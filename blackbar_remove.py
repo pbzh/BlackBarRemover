@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """BlackBar Remove - Detect and remove black bars from videos.
-   Optimised for Windows 11 with Intel Quick Sync Video (QSV) hardware acceleration.
+Optimised for Windows 11 with Intel Quick Sync Video (QSV) hardware acceleration.
 """
 
 import json
@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QPainter, QPen, QPixmap, QColor
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -44,18 +44,30 @@ from PyQt6.QtWidgets import (
 # Constants
 # ---------------------------------------------------------------------------
 
-SUPPORTED_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv", ".webm", ".m4v"}
-SUPPORTED_FORMATS = "Video Files (*.mp4 *.mkv *.avi *.mov *.ts *.flv *.wmv *.webm *.m4v);;All Files (*)"
+SUPPORTED_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".ts",
+    ".flv",
+    ".wmv",
+    ".webm",
+    ".m4v",
+}
+SUPPORTED_FORMATS = (
+    "Video Files (*.mp4 *.mkv *.avi *.mov *.ts *.flv *.wmv *.webm *.m4v);;All Files (*)"
+)
 
 # QSV hardware decoder map: codec name -> qsv decoder
 QSV_DECODERS: dict[str, str] = {
     "h264": "h264_qsv",
     "hevc": "hevc_qsv",
     "h265": "hevc_qsv",
-    "vp9":  "vp9_qsv",
-    "av1":  "av1_qsv",
+    "vp9": "vp9_qsv",
+    "av1": "av1_qsv",
     "mpeg2video": "mpeg2_qsv",
-    "vc1":  "vc1_qsv",
+    "vc1": "vc1_qsv",
 }
 
 # QSV hardware encoder map: codec name -> qsv encoder
@@ -63,7 +75,7 @@ QSV_ENCODERS: dict[str, str] = {
     "h264": "h264_qsv",
     "hevc": "hevc_qsv",
     "h265": "hevc_qsv",
-    "av1":  "av1_qsv",
+    "av1": "av1_qsv",
 }
 
 # Software fallback encoder map
@@ -71,7 +83,7 @@ SW_ENCODERS: dict[str, str] = {
     "h264": "libx264",
     "hevc": "libx265",
     "h265": "libx265",
-    "vp9":  "libvpx-vp9",
+    "vp9": "libvpx-vp9",
 }
 
 # Maximum concurrent cropdetect workers when processing a batch
@@ -84,31 +96,32 @@ QSV_PRESET_DEFAULT = "medium"
 
 # Hardware-acceleration mode labels shown in the UI
 HW_MODES = [
-    ("QSV – HW Encode",          "qsv"),
-    ("QSV – Full HW Pipeline",   "qsv_fullhw"),
-    ("CPU – Software",            "cpu"),
+    ("QSV – HW Encode", "qsv"),
+    ("QSV – Full HW Pipeline", "qsv_fullhw"),
+    ("CPU – Software", "cpu"),
 ]
 
 ASPECT_RATIOS = [
-    ("Custom",               None),
-    ("From detection",       None),
-    ("16:9",                 (16, 9)),
-    ("4:3",                  (4, 3)),
-    ("21:9",                 (21, 9)),
-    ("2.35:1 (Cinema)",      (2.35, 1)),
-    ("2.39:1 (Anamorphic)",  (2.39, 1)),
-    ("1.85:1",               (1.85, 1)),
-    ("1:1 (Square)",         (1, 1)),
-    ("9:16 (Portrait)",      (9, 16)),
-    ("4:5 (Portrait)",       (4, 5)),
-    ("3:2",                  (3, 2)),
-    ("5:4",                  (5, 4)),
+    ("Custom", None),
+    ("From detection", None),
+    ("16:9", (16, 9)),
+    ("4:3", (4, 3)),
+    ("21:9", (21, 9)),
+    ("2.35:1 (Cinema)", (2.35, 1)),
+    ("2.39:1 (Anamorphic)", (2.39, 1)),
+    ("1.85:1", (1.85, 1)),
+    ("1:1 (Square)", (1, 1)),
+    ("9:16 (Portrait)", (9, 16)),
+    ("4:5 (Portrait)", (4, 5)),
+    ("3:2", (3, 2)),
+    ("5:4", (5, 4)),
 ]
 
 
 # ---------------------------------------------------------------------------
 # ffmpeg / ffprobe auto-detection (Windows-aware)
 # ---------------------------------------------------------------------------
+
 
 def find_ffmpeg_tool(name: str) -> str:
     """Locate an ffmpeg tool on Windows.
@@ -136,7 +149,9 @@ def find_ffmpeg_tool(name: str) -> str:
         # Chocolatey
         Path(rf"C:\ProgramData\chocolatey\bin\{exe}"),
         # winget default location (varies)
-        Path(rf"C:\Users\{os.getenv('USERNAME', '')}\AppData\Local\Microsoft\WinGet\Packages\ffmpeg_{exe}"),
+        Path(
+            rf"C:\Users\{os.getenv('USERNAME', '')}\AppData\Local\Microsoft\WinGet\Packages\ffmpeg_{exe}"
+        ),
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -149,20 +164,23 @@ def check_qsv_available() -> bool:
     try:
         result = subprocess.run(
             [FFMPEG, "-hide_banner", "-hwaccels"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return "qsv" in result.stdout.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
 
 
-FFMPEG  = find_ffmpeg_tool("ffmpeg")
+FFMPEG = find_ffmpeg_tool("ffmpeg")
 FFPROBE = find_ffmpeg_tool("ffprobe")
 
 
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
+
 
 def parse_crop(crop_str: str) -> tuple[int, int, int, int]:
     """Parse 'crop=W:H:X:Y' → (W, H, X, Y)."""
@@ -186,9 +204,18 @@ def get_video_info(filepath: str) -> dict | None:
     """Return video/audio stream metadata via ffprobe, or None on failure."""
     try:
         result = subprocess.run(
-            [FFPROBE, "-v", "quiet", "-print_format", "json",
-             "-show_streams", "-show_format", filepath],
-            capture_output=True, text=True,
+            [
+                FFPROBE,
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_format",
+                filepath,
+            ],
+            capture_output=True,
+            text=True,
         )
         data = json.loads(result.stdout)
         info: dict = {"path": filepath}
@@ -197,11 +224,11 @@ def get_video_info(filepath: str) -> dict | None:
             if stream["codec_type"] == "video" and "video_codec" not in info:
                 codec = stream["codec_name"].lower()
                 info["video_codec"] = codec
-                info["width"]       = int(stream["width"])
-                info["height"]      = int(stream["height"])
-                info["pix_fmt"]     = stream.get("pix_fmt", "yuv420p")
+                info["width"] = int(stream["width"])
+                info["height"] = int(stream["height"])
+                info["pix_fmt"] = stream.get("pix_fmt", "yuv420p")
                 # Detect 10-bit content – QSV h264 only supports 8-bit
-                info["is_10bit"]    = "10" in stream.get("pix_fmt", "")
+                info["is_10bit"] = "10" in stream.get("pix_fmt", "")
             elif stream["codec_type"] == "audio" and "audio_codec" not in info:
                 info["audio_codec"] = stream["codec_name"]
 
@@ -212,16 +239,30 @@ def get_video_info(filepath: str) -> dict | None:
         return None
 
 
-def extract_frame(filepath: str, timestamp: float, crop_filter: str | None = None) -> str | None:
+def extract_frame(
+    filepath: str, timestamp: float, crop_filter: str | None = None
+) -> str | None:
     """Extract a single frame as PNG to a temp file.  Returns the path or None."""
     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     tmp.close()
 
     vf = crop_filter if crop_filter else "null"
     result = subprocess.run(
-        [FFMPEG, "-ss", str(timestamp), "-i", filepath,
-         "-vf", vf, "-frames:v", "1", "-y", tmp.name],
-        capture_output=True, text=True,
+        [
+            FFMPEG,
+            "-ss",
+            str(timestamp),
+            "-i",
+            filepath,
+            "-vf",
+            vf,
+            "-frames:v",
+            "1",
+            "-y",
+            tmp.name,
+        ],
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0 and os.path.getsize(tmp.name) > 0:
         return tmp.name
@@ -229,23 +270,24 @@ def extract_frame(filepath: str, timestamp: float, crop_filter: str | None = Non
     return None
 
 
-def calc_crop_for_aspect(orig_w: int, orig_h: int,
-                          ar_w: float, ar_h: float) -> tuple[int, int, int, int]:
+def calc_crop_for_aspect(
+    orig_w: int, orig_h: int, ar_w: float, ar_h: float
+) -> tuple[int, int, int, int]:
     """Return (crop_w, crop_h, offset_x, offset_y) for the target aspect ratio, centred."""
-    target_ratio  = ar_w / ar_h
+    target_ratio = ar_w / ar_h
     current_ratio = orig_w / orig_h
 
     if abs(current_ratio - target_ratio) < 0.001:
         return orig_w, orig_h, 0, 0
 
-    if current_ratio > target_ratio:          # too wide → pillarbox
+    if current_ratio > target_ratio:  # too wide → pillarbox
         new_h = orig_h
         new_w = int(orig_h * target_ratio)
-    else:                                      # too tall → letterbox
+    else:  # too tall → letterbox
         new_w = orig_w
         new_h = int(orig_w / target_ratio)
 
-    new_w = new_w - (new_w % 2)               # encoders require even dimensions
+    new_w = new_w - (new_w % 2)  # encoders require even dimensions
     new_h = new_h - (new_h % 2)
     new_w = min(new_w, orig_w)
     new_h = min(new_h, orig_h)
@@ -269,28 +311,40 @@ def format_timestamp(seconds: float) -> str:
 # Async workers (QProcess-based so the UI never blocks)
 # ---------------------------------------------------------------------------
 
+
 class CropDetectWorker:
     """Runs ffmpeg cropdetect asynchronously via QProcess."""
 
     def __init__(self, filepath: str, sample_interval: int, on_done):
-        self.filepath        = filepath
+        self.filepath = filepath
         self.sample_interval = sample_interval
-        self.on_done         = on_done
-        self._output         = ""
-        self.process         = QProcess()
+        self.on_done = on_done
+        self._output = ""
+        self.process = QProcess()
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read)
         self.process.finished.connect(self._finished)
 
     def start(self):
-        self.process.start(FFMPEG, [
-            "-i", self.filepath,
-            "-vf", f"fps=1/{self.sample_interval},cropdetect=24:16:0",
-            "-f", "null", "-",
-        ])
+        self.process.start(
+            FFMPEG,
+            [
+                "-i",
+                self.filepath,
+                "-vf",
+                f"fps=1/{self.sample_interval},cropdetect=24:16:0",
+                "-f",
+                "null",
+                "-",
+            ],
+        )
 
     def _read(self):
-        data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        data = (
+            self.process.readAllStandardOutput()
+            .data()
+            .decode("utf-8", errors="replace")
+        )
         self._output += data
 
     def _finished(self):
@@ -311,37 +365,48 @@ class EncodeWorker:
       cpu         – fully software encode via libx264 / libx265
     """
 
-    def __init__(self, filepath: str, output_path: str, crop_filter: str,
-                 hw_mode: str, video_info: dict, quality: int,
-                 look_ahead: bool, preset: str,
-                 on_progress, on_done):
-        self.filepath    = filepath
+    def __init__(
+        self,
+        filepath: str,
+        output_path: str,
+        crop_filter: str,
+        hw_mode: str,
+        video_info: dict,
+        quality: int,
+        look_ahead: bool,
+        preset: str,
+        on_progress,
+        on_done,
+    ):
+        self.filepath = filepath
         self.output_path = output_path
-        self.duration    = video_info.get("duration", 0)
+        self.duration = video_info.get("duration", 0)
         self.on_progress = on_progress
-        self.on_done     = on_done
-        self.process     = QProcess()
+        self.on_done = on_done
+        self.process = QProcess()
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read)
         self.process.finished.connect(self._finished)
 
         video_codec = video_info.get("video_codec", "h264").lower()
-        is_10bit    = video_info.get("is_10bit", False)
+        is_10bit = video_info.get("is_10bit", False)
 
         pre_input_args: list[str] = []
-        vf_filter  = crop_filter
+        vf_filter = crop_filter
         encoder: str
         enc_args: list[str] = []
 
         if hw_mode in ("qsv", "qsv_fullhw"):
             if video_codec == "h264" and is_10bit:
-                encoder  = "libx264"
+                encoder = "libx264"
                 enc_args = ["-crf", str(quality), "-preset", preset]
             else:
                 encoder = QSV_ENCODERS.get(video_codec, "h264_qsv")
                 enc_args = [
-                    "-global_quality", str(quality),
-                    "-preset", preset,
+                    "-global_quality",
+                    str(quality),
+                    "-preset",
+                    preset,
                 ]
                 if look_ahead and hw_mode != "qsv_fullhw":
                     # look_ahead performs better when frames are in system memory
@@ -351,9 +416,12 @@ class EncodeWorker:
                 decoder = QSV_DECODERS.get(video_codec)
                 if decoder:
                     pre_input_args = [
-                        "-hwaccel", "qsv",
-                        "-hwaccel_output_format", "qsv",
-                        "-c:v", decoder,
+                        "-hwaccel",
+                        "qsv",
+                        "-hwaccel_output_format",
+                        "qsv",
+                        "-c:v",
+                        decoder,
                     ]
                     vf_filter = crop_to_vf_qsv_fullhw(crop_filter)
                 else:
@@ -361,27 +429,39 @@ class EncodeWorker:
                     vf_filter = crop_filter
 
         else:  # cpu
-            encoder  = SW_ENCODERS.get(video_codec, "libx264")
+            encoder = SW_ENCODERS.get(video_codec, "libx264")
             enc_args = ["-crf", str(quality), "-preset", preset]
 
         self.args = [
             *pre_input_args,
-            "-i",    filepath,
-            "-vf",   vf_filter,
-            "-c:v",  encoder,
+            "-i",
+            filepath,
+            "-vf",
+            vf_filter,
+            "-c:v",
+            encoder,
             *enc_args,
-            "-c:a",  "copy",
-            "-c:s",  "copy",
-            "-map",  "0",
-            "-progress", "pipe:1",
-            "-y",    output_path,
+            "-c:a",
+            "copy",
+            "-c:s",
+            "copy",
+            "-map",
+            "0",
+            "-progress",
+            "pipe:1",
+            "-y",
+            output_path,
         ]
 
     def start(self):
         self.process.start(FFMPEG, self.args)
 
     def _read(self):
-        data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        data = (
+            self.process.readAllStandardOutput()
+            .data()
+            .decode("utf-8", errors="replace")
+        )
         for line in data.splitlines():
             if line.startswith("out_time_ms="):
                 try:
@@ -400,14 +480,15 @@ class EncodeWorker:
 # Preview panel
 # ---------------------------------------------------------------------------
 
+
 class PreviewPanel(QWidget):
     """Side-by-side preview with time scrubber, crop overlay and manual crop editing."""
 
-    crop_changed = pyqtSignal(str, str)   # (filepath, new_crop_string)
+    crop_changed = pyqtSignal(str, str)  # (filepath, new_crop_string)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._tmp_files: list[str]  = []
+        self._tmp_files: list[str] = []
         self._current_info: dict | None = None
         self._orig_pixmap: QPixmap | None = None
         self._suppress_spinbox_signals = False
@@ -431,15 +512,17 @@ class PreviewPanel(QWidget):
 
         # Time scrubber
         scrubber_row = QHBoxLayout()
-        self.lbl_time     = QLabel("0:00:00")
+        self.lbl_time = QLabel("0:00:00")
         self.lbl_time.setFixedWidth(60)
-        self.slider       = QSlider(Qt.Orientation.Horizontal)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setValue(0)
         self.slider.setEnabled(False)
         self.lbl_duration = QLabel("0:00:00")
         self.lbl_duration.setFixedWidth(60)
-        self.lbl_duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_duration.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         scrubber_row.addWidget(self.lbl_time)
         scrubber_row.addWidget(self.slider, 1)
         scrubber_row.addWidget(self.lbl_duration)
@@ -516,8 +599,13 @@ class PreviewPanel(QWidget):
         # Side-by-side image area
         images_layout = QHBoxLayout()
         for header_text, img_attr, scroll_attr, size_attr in (
-            ("Original (crop area highlighted)", "lbl_orig_img", "scroll_orig", "lbl_orig_size"),
-            ("After Crop",                       "lbl_crop_img", "scroll_crop", "lbl_crop_size"),
+            (
+                "Original (crop area highlighted)",
+                "lbl_orig_img",
+                "scroll_orig",
+                "lbl_orig_size",
+            ),
+            ("After Crop", "lbl_crop_img", "scroll_crop", "lbl_crop_size"),
         ):
             col = QVBoxLayout()
             hdr = QLabel(header_text)
@@ -561,8 +649,10 @@ class PreviewPanel(QWidget):
         self._tmp_files.clear()
 
     def _crop_from_spinboxes(self) -> str:
-        return (f"crop={self.sp_w.value()}:{self.sp_h.value()}"
-                f":{self.sp_x.value()}:{self.sp_y.value()}")
+        return (
+            f"crop={self.sp_w.value()}:{self.sp_h.value()}"
+            f":{self.sp_x.value()}:{self.sp_y.value()}"
+        )
 
     def _set_spinboxes_from_crop(self, crop: str):
         cw, ch, cx, cy = parse_crop(crop)
@@ -597,7 +687,7 @@ class PreviewPanel(QWidget):
             if auto_crop:
                 self._set_spinboxes_from_crop(auto_crop)
                 cw, ch, *_ = parse_crop(auto_crop)
-                self.lbl_ar_info.setText(f"Auto-detected: {cw}×{ch} ({cw/ch:.3f}:1)")
+                self.lbl_ar_info.setText(f"Auto-detected: {cw}×{ch} ({cw / ch:.3f}:1)")
                 self._live_update_overlay()
             return
         if ratio is None:
@@ -605,7 +695,7 @@ class PreviewPanel(QWidget):
 
         cw, ch, cx, cy = calc_crop_for_aspect(orig_w, orig_h, *ratio)
         self._set_spinboxes_from_crop(f"crop={cw}:{ch}:{cx}:{cy}")
-        self.lbl_ar_info.setText(f"{cw}×{ch} ({cw/ch:.3f}:1)")
+        self.lbl_ar_info.setText(f"{cw}×{ch} ({cw / ch:.3f}:1)")
         self._live_update_overlay()
 
     def _on_spinbox_changed(self, _value: int):
@@ -648,7 +738,9 @@ class PreviewPanel(QWidget):
             bar_desc.append(f"{removed_h}px horizontal")
         if removed_w > 0:
             bar_desc.append(f"{removed_w}px vertical")
-        modified = " (manual)" if crop != info.get("crop_auto", info.get("crop")) else ""
+        modified = (
+            " (manual)" if crop != info.get("crop_auto", info.get("crop")) else ""
+        )
         self.lbl_info.setText(
             f"{Path(info['path']).name}  |  "
             f"{orig_w}×{orig_h} → {cw}×{ch}  |  "
@@ -693,9 +785,9 @@ class PreviewPanel(QWidget):
         self._set_crop_controls_enabled(True)
 
         self._suppress_spinbox_signals = True
-        self.cb_aspect.setCurrentIndex(1)   # "From detection"
+        self.cb_aspect.setCurrentIndex(1)  # "From detection"
         self._suppress_spinbox_signals = False
-        self.lbl_ar_info.setText(f"Auto-detected: {cw}×{ch} ({cw/ch:.3f}:1)")
+        self.lbl_ar_info.setText(f"Auto-detected: {cw}×{ch} ({cw / ch:.3f}:1)")
         self._update_info_label(crop)
 
         duration = info.get("duration", 0)
@@ -708,7 +800,7 @@ class PreviewPanel(QWidget):
     def clear(self):
         self._cleanup_tmp()
         self._current_info = None
-        self._orig_pixmap  = None
+        self._orig_pixmap = None
         self._clear_images()
         self.lbl_info.setText("Select a file and run detection, then click Preview")
         self.slider.setEnabled(False)
@@ -855,7 +947,7 @@ class PreviewPanel(QWidget):
         self.cb_aspect.setCurrentIndex(1)
         self._suppress_spinbox_signals = False
         cw, ch, *_ = parse_crop(auto_crop)
-        self.lbl_ar_info.setText(f"Auto-detected: {cw}×{ch} ({cw/ch:.3f}:1)")
+        self.lbl_ar_info.setText(f"Auto-detected: {cw}×{ch} ({cw / ch:.3f}:1)")
         self._update_info_label(auto_crop)
         timestamp = self.slider.value()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -875,19 +967,20 @@ class PreviewPanel(QWidget):
 # Main application window
 # ---------------------------------------------------------------------------
 
+
 class BlackBarRemoveApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BlackBar Remove  –  QSV Edition")
         self.setMinimumSize(1060, 780)
 
-        self.files: list[dict]          = []
+        self.files: list[dict] = []
         self.crop_workers: list[CropDetectWorker] = []
-        self.encode_worker: EncodeWorker | None   = None
-        self.encode_queue: list[dict]   = []
-        self._detect_index       = 0
+        self.encode_worker: EncodeWorker | None = None
+        self.encode_queue: list[dict] = []
+        self._detect_index = 0
         self._active_detect_count = 0
-        self._encode_index       = 0
+        self._encode_index = 0
 
         self._build_ui()
         self._check_ffmpeg_on_startup()
@@ -936,7 +1029,7 @@ class BlackBarRemoveApp(QMainWindow):
         input_layout = QVBoxLayout(input_group)
 
         row1 = QHBoxLayout()
-        self.rb_file   = QRadioButton("Single File")
+        self.rb_file = QRadioButton("Single File")
         self.rb_folder = QRadioButton("Folder (Batch)")
         self.rb_file.setChecked(True)
         row1.addWidget(self.rb_file)
@@ -963,7 +1056,7 @@ class BlackBarRemoveApp(QMainWindow):
         self.cb_hw = QComboBox()
         for label, _key in HW_MODES:
             self.cb_hw.addItem(label)
-        self.cb_hw.setCurrentIndex(0)   # QSV – HW Encode is the default
+        self.cb_hw.setCurrentIndex(0)  # QSV – HW Encode is the default
         self.cb_hw.setToolTip(
             "QSV – HW Encode:         Software decode, Intel QSV hardware encode  (most compatible)\n"
             "QSV – Full HW Pipeline:  Intel QSV decode + crop + encode  (fastest, needs QSV decoder)\n"
@@ -993,7 +1086,9 @@ class BlackBarRemoveApp(QMainWindow):
         self.cb_preset = QComboBox()
         self.cb_preset.addItems(QSV_PRESETS)
         self.cb_preset.setCurrentText(QSV_PRESET_DEFAULT)
-        self.cb_preset.setToolTip("Encoding speed preset.  Slower = better compression.")
+        self.cb_preset.setToolTip(
+            "Encoding speed preset.  Slower = better compression."
+        )
         settings_layout.addWidget(self.cb_preset)
 
         settings_layout.addSpacing(8)
@@ -1014,7 +1109,9 @@ class BlackBarRemoveApp(QMainWindow):
         self.sp_interval = QSpinBox()
         self.sp_interval.setRange(1, 120)
         self.sp_interval.setValue(15)
-        self.sp_interval.setToolTip("Seconds between frames sampled for black-bar detection.")
+        self.sp_interval.setToolTip(
+            "Seconds between frames sampled for black-bar detection."
+        )
         settings_layout.addWidget(self.sp_interval)
 
         settings_layout.addSpacing(16)
@@ -1064,7 +1161,7 @@ class BlackBarRemoveApp(QMainWindow):
 
         # Action buttons
         action_row = QHBoxLayout()
-        self.btn_detect  = QPushButton("Detect Black Bars")
+        self.btn_detect = QPushButton("Detect Black Bars")
         self.btn_detect.clicked.connect(self._start_detection)
         self.btn_preview = QPushButton("Preview")
         self.btn_preview.clicked.connect(self._preview_selected)
@@ -1133,8 +1230,7 @@ class BlackBarRemoveApp(QMainWindow):
             paths = [p]
         elif p.is_dir():
             paths = sorted(
-                f for f in p.iterdir()
-                if f.suffix.lower() in SUPPORTED_EXTENSIONS
+                f for f in p.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS
             )
         else:
             self._log(f"Invalid path: {path}")
@@ -1151,7 +1247,9 @@ class BlackBarRemoveApp(QMainWindow):
             if info.get("is_10bit"):
                 codec_label += " (10-bit)"
             self.table.setItem(i, 0, QTableWidgetItem(Path(info["path"]).name))
-            self.table.setItem(i, 1, QTableWidgetItem(f"{info['width']}×{info['height']}"))
+            self.table.setItem(
+                i, 1, QTableWidgetItem(f"{info['width']}×{info['height']}")
+            )
             self.table.setItem(i, 2, QTableWidgetItem(codec_label))
             self.table.setItem(i, 3, QTableWidgetItem(""))
             self.table.setItem(i, 4, QTableWidgetItem(""))
@@ -1180,7 +1278,9 @@ class BlackBarRemoveApp(QMainWindow):
             return
         info = self.files[row]
         if not info.get("crop"):
-            self._log(f"No crop data for {Path(info['path']).name} — run detection first.")
+            self._log(
+                f"No crop data for {Path(info['path']).name} — run detection first."
+            )
             return
         self.preview.load_file(info)
 
@@ -1194,7 +1294,7 @@ class BlackBarRemoveApp(QMainWindow):
                     self.table.setItem(i, 5, QTableWidgetItem("No black bars"))
                 else:
                     removed_h = info["height"] - ch
-                    removed_w = info["width"]  - cw
+                    removed_w = info["width"] - cw
                     details = []
                     if removed_h > 0:
                         details.append(f"{removed_h}px horizontal bars")
@@ -1202,8 +1302,7 @@ class BlackBarRemoveApp(QMainWindow):
                         details.append(f"{removed_w}px vertical bars")
                     suffix = " (manual)" if new_crop != info.get("crop_auto") else ""
                     self.table.setItem(
-                        i, 5,
-                        QTableWidgetItem(f"Crop: {', '.join(details)}{suffix}")
+                        i, 5, QTableWidgetItem(f"Crop: {', '.join(details)}{suffix}")
                     )
                 self._log(f"Crop updated: {Path(filepath).name} → {new_crop}")
                 break
@@ -1220,7 +1319,7 @@ class BlackBarRemoveApp(QMainWindow):
         self.btn_process.setEnabled(False)
         self.btn_preview.setEnabled(False)
         self.crop_workers.clear()
-        self._detect_index        = 0
+        self._detect_index = 0
         self._active_detect_count = 0
         self._log("Starting black-bar detection…")
         self.progress.setVisible(True)
@@ -1234,14 +1333,15 @@ class BlackBarRemoveApp(QMainWindow):
         """Start detection for the next queued file, if any."""
         if self._detect_index >= len(self.files):
             return
-        idx  = self._detect_index
-        self._detect_index        += 1
+        idx = self._detect_index
+        self._detect_index += 1
         self._active_detect_count += 1
         info = self.files[idx]
         self.table.setItem(idx, 5, QTableWidgetItem("Detecting…"))
         self._log(f"Detecting: {Path(info['path']).name}")
         worker = CropDetectWorker(
-            info["path"], self.sp_interval.value(),
+            info["path"],
+            self.sp_interval.value(),
             lambda fp, crop, row=idx: self._on_crop_detected(fp, crop, row),
         )
         self.crop_workers.append(worker)
@@ -1262,8 +1362,8 @@ class BlackBarRemoveApp(QMainWindow):
                 self._log(f"  No black bars: {Path(filepath).name}")
             else:
                 removed_h = info["height"] - ch
-                removed_w = info["width"]  - cw
-                details   = []
+                removed_w = info["width"] - cw
+                details = []
                 if removed_h > 0:
                     details.append(f"{removed_h}px horizontal bars")
                 if removed_w > 0:
@@ -1345,17 +1445,17 @@ class BlackBarRemoveApp(QMainWindow):
             self.progress.setVisible(False)
             return
 
-        info     = self.encode_queue[self._encode_index]
+        info = self.encode_queue[self._encode_index]
         filepath = info["path"]
-        p        = Path(filepath)
+        p = Path(filepath)
 
         if self.chk_overwrite.isChecked():
-            output_path      = str(p.with_stem(p.stem + "_tmp"))
+            output_path = str(p.with_stem(p.stem + "_tmp"))
             info["_overwrite"] = True
-            info["_tmp_path"]  = output_path
+            info["_tmp_path"] = output_path
         else:
-            suffix            = self.le_suffix.text() or "_nocrop"
-            output_path       = str(p.with_stem(p.stem + suffix))
+            suffix = self.le_suffix.text() or "_nocrop"
+            output_path = str(p.with_stem(p.stem + suffix))
             info["_overwrite"] = False
 
         info["_output"] = output_path
@@ -1365,16 +1465,16 @@ class BlackBarRemoveApp(QMainWindow):
 
         hw_mode = self._hw_mode_key()
         self.encode_worker = EncodeWorker(
-            filepath        = filepath,
-            output_path     = output_path,
-            crop_filter     = info["crop"],
-            hw_mode         = hw_mode,
-            video_info      = info,
-            quality         = self.sp_quality.value(),
-            look_ahead      = self.chk_lookahead.isChecked() and hw_mode == "qsv",
-            preset          = self.cb_preset.currentText(),
-            on_progress     = self._on_encode_progress,
-            on_done         = self._on_encode_done,
+            filepath=filepath,
+            output_path=output_path,
+            crop_filter=info["crop"],
+            hw_mode=hw_mode,
+            video_info=info,
+            quality=self.sp_quality.value(),
+            look_ahead=self.chk_lookahead.isChecked() and hw_mode == "qsv",
+            preset=self.cb_preset.currentText(),
+            on_progress=self._on_encode_progress,
+            on_done=self._on_encode_done,
         )
         self.encode_worker.start()
 
@@ -1383,8 +1483,8 @@ class BlackBarRemoveApp(QMainWindow):
 
     def _on_encode_done(self, filepath: str, success: bool):
         info = self.encode_queue[self._encode_index]
-        row  = self.files.index(info)
-        p    = Path(filepath)
+        row = self.files.index(info)
+        p = Path(filepath)
 
         if success:
             if info.get("_overwrite"):
@@ -1416,6 +1516,7 @@ class BlackBarRemoveApp(QMainWindow):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main():
     app = QApplication(sys.argv)
