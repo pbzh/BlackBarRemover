@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """BlackBar Remove - Detect and remove black bars from videos.
-Optimised for Windows 11 with Intel Quick Sync Video (QSV) hardware acceleration.
+Supports Intel QSV and Apple VideoToolbox hardware acceleration.
 """
 
 import json
@@ -86,6 +86,14 @@ SW_ENCODERS: dict[str, str] = {
     "vp9": "libvpx-vp9",
 }
 
+# VideoToolbox hardware encoder map (Apple Silicon / macOS)
+VT_ENCODERS: dict[str, str] = {
+    "h264": "h264_videotoolbox",
+    "hevc": "hevc_videotoolbox",
+    "h265": "hevc_videotoolbox",
+    "prores": "prores_videotoolbox",
+}
+
 # Maximum concurrent cropdetect workers when processing a batch
 MAX_DETECT_WORKERS = 4
 
@@ -94,11 +102,18 @@ QSV_QUALITY_DEFAULT = 23
 QSV_PRESETS = ["veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
 QSV_PRESET_DEFAULT = "medium"
 
-# Hardware-acceleration mode labels shown in the UI
+# Hardware-acceleration mode labels shown in the UI (filtered by platform)
+_HW_MODES_ALL = [
+    ("QSV – HW Encode",                "qsv",        ("win32", "linux")),
+    ("QSV – Full HW Pipeline",         "qsv_fullhw", ("win32", "linux")),
+    ("VideoToolbox – HW Encode",        "vt",         ("darwin",)),
+    ("VideoToolbox – Full HW Pipeline", "vt_fullhw",  ("darwin",)),
+    ("CPU – Software",                  "cpu",        None),
+]
 HW_MODES = [
-    ("QSV – HW Encode", "qsv"),
-    ("QSV – Full HW Pipeline", "qsv_fullhw"),
-    ("CPU – Software", "cpu"),
+    (label, key)
+    for label, key, platforms in _HW_MODES_ALL
+    if platforms is None or sys.platform in platforms
 ]
 
 ASPECT_RATIOS = [
@@ -119,44 +134,53 @@ ASPECT_RATIOS = [
 
 
 # ---------------------------------------------------------------------------
-# ffmpeg / ffprobe auto-detection (Windows-aware)
+# ffmpeg / ffprobe auto-detection
 # ---------------------------------------------------------------------------
 
 
 def find_ffmpeg_tool(name: str) -> str:
-    """Locate an ffmpeg tool on Windows.
+    """Locate an ffmpeg tool on the current platform.
 
     Checks the system PATH first via shutil.which (no subprocess overhead),
-    then falls back to common installation directories used by winget,
-    Chocolatey, Scoop and manual installs using Path.exists().
+    then falls back to common installation directories for the current OS.
     Returns the first match found, or *name* as a last resort so that a
     clear 'not found' error surfaces at runtime.
     """
-    # Fast PATH check — no subprocess needed
     found = shutil.which(name)
     if found:
         return found
 
-    exe = f"{name}.exe"
     home = Path.home()
-    candidates = [
-        Path(rf"C:\ffmpeg\bin\{exe}"),
-        Path(rf"C:\Program Files\ffmpeg\bin\{exe}"),
-        Path(rf"C:\Program Files (x86)\ffmpeg\bin\{exe}"),
-        home / "ffmpeg" / "bin" / exe,
-        # Scoop
-        home / "scoop" / "apps" / "ffmpeg" / "current" / "bin" / exe,
-        # Chocolatey
-        Path(rf"C:\ProgramData\chocolatey\bin\{exe}"),
-        # winget default location (varies)
-        Path(
-            rf"C:\Users\{os.getenv('USERNAME', '')}\AppData\Local\Microsoft\WinGet\Packages\ffmpeg_{exe}"
-        ),
-    ]
+    candidates: list[Path] = []
+
+    if sys.platform == "win32":
+        exe = f"{name}.exe"
+        candidates = [
+            Path(rf"C:\ffmpeg\bin\{exe}"),
+            Path(rf"C:\Program Files\ffmpeg\bin\{exe}"),
+            Path(rf"C:\Program Files (x86)\ffmpeg\bin\{exe}"),
+            home / "ffmpeg" / "bin" / exe,
+            home / "scoop" / "apps" / "ffmpeg" / "current" / "bin" / exe,
+            Path(rf"C:\ProgramData\chocolatey\bin\{exe}"),
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            Path(f"/opt/homebrew/bin/{name}"),
+            Path(f"/usr/local/bin/{name}"),
+            home / "bin" / name,
+        ]
+    else:  # Linux and others
+        candidates = [
+            Path(f"/usr/bin/{name}"),
+            Path(f"/usr/local/bin/{name}"),
+            Path(f"/snap/bin/{name}"),
+            home / "bin" / name,
+        ]
+
     for candidate in candidates:
         if candidate.exists():
             return str(candidate)
-    return name  # will produce a useful error at first use
+    return name
 
 
 def check_qsv_available() -> bool:
@@ -169,6 +193,20 @@ def check_qsv_available() -> bool:
             timeout=10,
         )
         return "qsv" in result.stdout.lower()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def check_vt_available() -> bool:
+    """Return True if FFmpeg was built with VideoToolbox support."""
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-hide_banner", "-hwaccels"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return "videotoolbox" in result.stdout.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
 
@@ -198,6 +236,16 @@ def crop_to_vf_qsv_fullhw(crop_filter: str) -> str:
     differences across FFmpeg versions while still offloading decode/encode.
     """
     return f"hwdownload,format=nv12,{crop_filter},hwupload=extra_hw_frames=64"
+
+
+def crop_to_vf_vt_fullhw(crop_filter: str) -> str:
+    """Convert 'crop=W:H:X:Y' to a filter chain for the VideoToolbox full HW pipeline.
+
+    With -hwaccel videotoolbox -hwaccel_output_format videotoolbox, frames
+    live on GPU surfaces.  We download to system memory for the CPU crop
+    filter; the VideoToolbox encoder accepts CPU frames directly.
+    """
+    return f"hwdownload,format=nv12,{crop_filter}"
 
 
 def get_video_info(filepath: str) -> dict | None:
@@ -359,9 +407,11 @@ class CropDetectWorker:
 class EncodeWorker:
     """Runs ffmpeg encoding asynchronously via QProcess.
 
-    Supports three hardware modes:
-      qsv         – software decode, QSV hardware encode  (most compatible)
-      qsv_fullhw  – QSV hardware decode + crop + QSV hardware encode (fastest)
+    Supports five hardware modes:
+      qsv         – software decode, QSV hardware encode  (Windows/Linux)
+      qsv_fullhw  – QSV hardware decode + crop + QSV encode  (fastest on Intel)
+      vt          – software decode, VideoToolbox hardware encode  (macOS)
+      vt_fullhw   – VideoToolbox decode + crop + VT encode  (fastest on macOS)
       cpu         – fully software encode via libx264 / libx265
     """
 
@@ -427,6 +477,21 @@ class EncodeWorker:
                 else:
                     # No QSV decoder for this codec – still use QSV encode
                     vf_filter = crop_filter
+
+        elif hw_mode in ("vt", "vt_fullhw"):
+            encoder = VT_ENCODERS.get(video_codec, "h264_videotoolbox")
+            # Map quality 1–51 (lower=better) to VT q:v 1.0–0.0 (higher=better)
+            vt_q = max(0.01, 1.0 - (quality - 1) / 50.0)
+            enc_args = ["-q:v", f"{vt_q:.2f}", "-allow_sw", "1"]
+
+            if hw_mode == "vt_fullhw":
+                pre_input_args = [
+                    "-hwaccel",
+                    "videotoolbox",
+                    "-hwaccel_output_format",
+                    "videotoolbox",
+                ]
+                vf_filter = crop_to_vf_vt_fullhw(crop_filter)
 
         else:  # cpu
             encoder = SW_ENCODERS.get(video_codec, "libx264")
@@ -971,7 +1036,7 @@ class PreviewPanel(QWidget):
 class BlackBarRemoveApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BlackBar Remove  –  QSV Edition")
+        self.setWindowTitle("BlackBar Remove")
         self.setMinimumSize(1060, 780)
 
         self.files: list[dict] = []
@@ -990,7 +1055,7 @@ class BlackBarRemoveApp(QMainWindow):
     # ------------------------------------------------------------------
 
     def _check_ffmpeg_on_startup(self):
-        """Warn the user if ffmpeg is not found or QSV is unavailable."""
+        """Warn the user if ffmpeg is not found or HW accel is unavailable."""
         try:
             result = subprocess.run(
                 [FFMPEG, "-version"], capture_output=True, timeout=8
@@ -1000,20 +1065,34 @@ class BlackBarRemoveApp(QMainWindow):
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             self._log(
                 f"⚠  ffmpeg not found at '{FFMPEG}'.  "
-                "Install ffmpeg and make sure it is in your PATH "
-                "(or place it in C:\\ffmpeg\\bin)."
+                "Install ffmpeg and make sure it is in your PATH."
             )
             return
 
-        if not check_qsv_available():
-            self._log(
-                "⚠  QSV does not appear to be available in this ffmpeg build.  "
-                "Install an ffmpeg build with --enable-libmfx / --enable-qsv "
-                "(e.g. from https://github.com/BtbN/FFmpeg-Builds).  "
-                "CPU mode will still work."
-            )
+        hw_available = []
+        if sys.platform in ("win32", "linux") and check_qsv_available():
+            hw_available.append("QSV")
+        if sys.platform == "darwin" and check_vt_available():
+            hw_available.append("VideoToolbox")
+
+        if hw_available:
+            self._log(f"✔  ffmpeg found: {FFMPEG}  |  {', '.join(hw_available)} available")
         else:
-            self._log(f"✔  ffmpeg found: {FFMPEG}  |  QSV available")
+            if sys.platform in ("win32", "linux"):
+                self._log(
+                    "⚠  QSV does not appear to be available in this ffmpeg build.  "
+                    "Install an ffmpeg build with --enable-libmfx / --enable-qsv "
+                    "(e.g. from https://github.com/BtbN/FFmpeg-Builds).  "
+                    "CPU mode will still work."
+                )
+            elif sys.platform == "darwin":
+                self._log(
+                    "⚠  VideoToolbox does not appear to be available in this ffmpeg build.  "
+                    "Install ffmpeg via Homebrew: brew install ffmpeg.  "
+                    "CPU mode will still work."
+                )
+            else:
+                self._log(f"✔  ffmpeg found: {FFMPEG}  |  CPU mode only")
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1058,8 +1137,10 @@ class BlackBarRemoveApp(QMainWindow):
             self.cb_hw.addItem(label)
         self.cb_hw.setCurrentIndex(0)  # QSV – HW Encode is the default
         self.cb_hw.setToolTip(
-            "QSV – HW Encode:         Software decode, Intel QSV hardware encode  (most compatible)\n"
-            "QSV – Full HW Pipeline:  Intel QSV decode + crop + encode  (fastest, needs QSV decoder)\n"
+            "QSV – HW Encode:         Software decode, Intel QSV hardware encode\n"
+            "QSV – Full HW Pipeline:  Intel QSV decode + crop + encode  (fastest on Intel)\n"
+            "VideoToolbox – HW Encode:         Software decode, Apple VT hardware encode\n"
+            "VideoToolbox – Full HW Pipeline:  Apple VT decode + crop + encode  (fastest on macOS)\n"
             "CPU – Software:          Fully software encode via libx264 / libx265"
         )
         self.cb_hw.currentIndexChanged.connect(self._on_hw_mode_changed)
@@ -1074,6 +1155,7 @@ class BlackBarRemoveApp(QMainWindow):
         self.sp_quality.setValue(QSV_QUALITY_DEFAULT)
         self.sp_quality.setToolTip(
             "QSV: global_quality  (1 = best quality / largest file,  51 = worst / smallest)\n"
+            "VideoToolbox: quality mapped to 1.0–0.0 range\n"
             "CPU: CRF value  (same scale applies for libx264/libx265)"
         )
         self.sp_quality.setFixedWidth(60)
@@ -1170,9 +1252,13 @@ class BlackBarRemoveApp(QMainWindow):
         self.btn_process = QPushButton("Process")
         self.btn_process.clicked.connect(self._start_processing)
         self.btn_process.setEnabled(False)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self._cancel_operation)
+        self.btn_cancel.setEnabled(False)
         action_row.addWidget(self.btn_detect)
         action_row.addWidget(self.btn_preview)
         action_row.addWidget(self.btn_process)
+        action_row.addWidget(self.btn_cancel)
         action_row.addStretch()
         layout.addLayout(action_row)
 
@@ -1199,8 +1285,47 @@ class BlackBarRemoveApp(QMainWindow):
         mode = self._hw_mode_key()
         # Look-ahead is only meaningful for QSV HW Encode mode
         self.chk_lookahead.setEnabled(mode == "qsv")
-        if mode == "qsv_fullhw":
+        if mode != "qsv":
             self.chk_lookahead.setChecked(False)
+        # Presets don't apply to VideoToolbox
+        self.cb_preset.setEnabled(mode not in ("vt", "vt_fullhw"))
+
+    # ------------------------------------------------------------------
+    # Cancellation
+    # ------------------------------------------------------------------
+
+    def _cancel_operation(self):
+        """Cancel any running detection or encoding operation."""
+        cancelled = False
+
+        for worker in self.crop_workers:
+            if worker.process.state() != QProcess.ProcessState.NotRunning:
+                worker.process.kill()
+                cancelled = True
+        if cancelled:
+            self.crop_workers.clear()
+            self._active_detect_count = 0
+
+        if self.encode_worker and self.encode_worker.process.state() != QProcess.ProcessState.NotRunning:
+            self.encode_worker.process.kill()
+            if self._encode_index < len(self.encode_queue):
+                output = self.encode_queue[self._encode_index].get("_output", "")
+                if output and os.path.exists(output):
+                    try:
+                        os.remove(output)
+                    except OSError:
+                        pass
+            self.encode_worker = None
+            self.encode_queue.clear()
+            cancelled = True
+
+        if cancelled:
+            self._log("Operation cancelled.")
+            self.btn_detect.setEnabled(True)
+            self.btn_process.setEnabled(bool(self.files))
+            self.btn_preview.setEnabled(bool(self.files))
+            self.btn_cancel.setEnabled(False)
+            self.progress.setVisible(False)
 
     # ------------------------------------------------------------------
     # File management
@@ -1318,6 +1443,7 @@ class BlackBarRemoveApp(QMainWindow):
         self.btn_detect.setEnabled(False)
         self.btn_process.setEnabled(False)
         self.btn_preview.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.crop_workers.clear()
         self._detect_index = 0
         self._active_detect_count = 0
@@ -1388,6 +1514,7 @@ class BlackBarRemoveApp(QMainWindow):
         self.btn_detect.setEnabled(True)
         self.btn_process.setEnabled(True)
         self.btn_preview.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
         self.progress.setVisible(False)
         # Auto-preview the first file that has bars
         for i, info in enumerate(self.files):
@@ -1430,6 +1557,7 @@ class BlackBarRemoveApp(QMainWindow):
         self.btn_detect.setEnabled(False)
         self.btn_process.setEnabled(False)
         self.btn_preview.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.progress.setVisible(True)
         self.progress.setMaximum(100)
         self.progress.setValue(0)
@@ -1442,6 +1570,7 @@ class BlackBarRemoveApp(QMainWindow):
             self.btn_detect.setEnabled(True)
             self.btn_process.setEnabled(True)
             self.btn_preview.setEnabled(True)
+            self.btn_cancel.setEnabled(False)
             self.progress.setVisible(False)
             return
 
@@ -1499,7 +1628,7 @@ class BlackBarRemoveApp(QMainWindow):
             self.table.setItem(row, 5, QTableWidgetItem("Error ✖"))
             self._log(
                 f"  Error encoding: {p.name}  "
-                "(check the log – QSV may not support this codec/format; "
+                "(check the log – HW encoder may not support this codec/format; "
                 "try switching to CPU mode)"
             )
             output = info.get("_output", "")
@@ -1511,6 +1640,22 @@ class BlackBarRemoveApp(QMainWindow):
 
         self._encode_index += 1
         self._encode_next()
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event):
+        """Cancel running operations and clean up temp files on window close."""
+        for worker in self.crop_workers:
+            if worker.process.state() != QProcess.ProcessState.NotRunning:
+                worker.process.kill()
+                worker.process.waitForFinished(2000)
+        if self.encode_worker and self.encode_worker.process.state() != QProcess.ProcessState.NotRunning:
+            self.encode_worker.process.kill()
+            self.encode_worker.process.waitForFinished(2000)
+        self.preview._cleanup_tmp()
+        super().closeEvent(event)
 
 
 # ---------------------------------------------------------------------------
