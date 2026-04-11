@@ -14,7 +14,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PyQt6.QtCore import QProcess, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QProcess, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -542,6 +542,233 @@ class EncodeWorker:
 
 
 # ---------------------------------------------------------------------------
+# Interactive crop canvas
+# ---------------------------------------------------------------------------
+
+
+class CropCanvas(QLabel):
+    """QLabel subclass that displays a frame with a draggable crop overlay.
+
+    The user can drag the crop rectangle or its eight edge/corner handles to
+    adjust the crop interactively without typing numbers.
+    """
+
+    # emitted continuously while dragging (cw, ch, cx, cy in original pixels)
+    crop_changed = pyqtSignal(int, int, int, int)
+    # emitted once on mouse-release so callers can trigger an expensive update
+    crop_committed = pyqtSignal(int, int, int, int)
+
+    _HANDLE = 8   # half-size of each handle square in display pixels
+    _CURSOR = {
+        "nw": Qt.CursorShape.SizeFDiagCursor,
+        "se": Qt.CursorShape.SizeFDiagCursor,
+        "ne": Qt.CursorShape.SizeBDiagCursor,
+        "sw": Qt.CursorShape.SizeBDiagCursor,
+        "n":  Qt.CursorShape.SizeVerCursor,
+        "s":  Qt.CursorShape.SizeVerCursor,
+        "w":  Qt.CursorShape.SizeHorCursor,
+        "e":  Qt.CursorShape.SizeHorCursor,
+        "move": Qt.CursorShape.SizeAllCursor,
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setMinimumSize(200, 150)
+        self.setStyleSheet("background: #000;")
+        self.setMouseTracking(True)
+
+        self._src: QPixmap | None = None   # original unscaled frame
+        self._scale = 1.0                  # display / original pixel ratio
+        self._orig_w = 0
+        self._orig_h = 0
+        self._crop: tuple[int, int, int, int] | None = None  # (cw, ch, cx, cy)
+
+        # drag state
+        self._drag_mode: str | None = None
+        self._drag_anchor: QPoint | None = None
+        self._drag_crop0: tuple | None = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def load_frame(self, pixmap: QPixmap, crop: tuple[int, int, int, int], avail_w: int):
+        """Set source frame, initial crop, and available display width."""
+        self._src = pixmap
+        self._orig_w = pixmap.width()
+        self._orig_h = pixmap.height()
+        self._scale = min(1.0, avail_w / self._orig_w) if avail_w > 0 and self._orig_w > 0 else 1.0
+        self._crop = crop
+        self._redraw()
+
+    def set_crop(self, crop: tuple[int, int, int, int]):
+        """Update crop without reloading the frame (called from spinboxes)."""
+        self._crop = crop
+        if self._src:
+            self._redraw()
+
+    def clear_frame(self):
+        self._src = None
+        self._crop = None
+        self.clear()
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _redraw(self):
+        if not self._src or self._src.isNull():
+            return
+        s = self._scale
+        dw = round(self._orig_w * s)
+        dh = round(self._orig_h * s)
+        scaled = self._src.scaled(dw, dh,
+                                   Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+        overlay = QPixmap(scaled)
+        p = QPainter(overlay)
+
+        if self._crop:
+            cw, ch, cx, cy = self._crop
+            dx, dy = round(cx * s), round(cy * s)
+            dw2, dh2 = round(cw * s), round(ch * s)
+
+            # Darken everything outside the crop area
+            p.setOpacity(0.55)
+            p.fillRect(0, 0, dw, dh, QColor(0, 0, 0))
+
+            # Restore the crop region at full brightness
+            p.setOpacity(1.0)
+            p.drawPixmap(dx, dy, scaled, dx, dy, dw2, dh2)
+
+            # Red border
+            p.setPen(QPen(Qt.GlobalColor.red, 2))
+            p.drawRect(dx + 1, dy + 1, dw2 - 2, dh2 - 2)
+
+            # White handles at corners and edge midpoints
+            h = self._HANDLE
+            p.setPen(QPen(QColor(255, 255, 255, 220), 1))
+            p.setBrush(QColor(255, 255, 255, 210))
+            for hx, hy in (
+                (dx, dy), (dx + dw2, dy), (dx, dy + dh2), (dx + dw2, dy + dh2),
+                (dx + dw2 // 2, dy), (dx + dw2 // 2, dy + dh2),
+                (dx, dy + dh2 // 2), (dx + dw2, dy + dh2 // 2),
+            ):
+                p.drawRect(hx - h // 2, hy - h // 2, h, h)
+
+        p.end()
+        self.setPixmap(overlay)
+        self.adjustSize()
+
+    # ------------------------------------------------------------------
+    # Hit-testing
+    # ------------------------------------------------------------------
+
+    def _hit_zones(self) -> dict[str, QRect]:
+        if not self._crop:
+            return {}
+        cw, ch, cx, cy = self._crop
+        s = self._scale
+        dx, dy = round(cx * s), round(cy * s)
+        dw, dh = round(cw * s), round(ch * s)
+        h = self._HANDLE + 2
+        mx, my = dx + dw // 2, dy + dh // 2
+        return {
+            "nw": QRect(dx - h, dy - h, 2 * h, 2 * h),
+            "ne": QRect(dx + dw - h, dy - h, 2 * h, 2 * h),
+            "sw": QRect(dx - h, dy + dh - h, 2 * h, 2 * h),
+            "se": QRect(dx + dw - h, dy + dh - h, 2 * h, 2 * h),
+            "n":  QRect(mx - h, dy - h, 2 * h, 2 * h),
+            "s":  QRect(mx - h, dy + dh - h, 2 * h, 2 * h),
+            "w":  QRect(dx - h, my - h, 2 * h, 2 * h),
+            "e":  QRect(dx + dw - h, my - h, 2 * h, 2 * h),
+        }
+
+    def _hit(self, pos: QPoint) -> str | None:
+        for name, rect in self._hit_zones().items():
+            if rect.contains(pos):
+                return name
+        if not self._crop:
+            return None
+        cw, ch, cx, cy = self._crop
+        s = self._scale
+        if QRect(round(cx * s), round(cy * s), round(cw * s), round(ch * s)).contains(pos):
+            return "move"
+        return None
+
+    # ------------------------------------------------------------------
+    # Mouse events
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton or not self._crop:
+            return
+        mode = self._hit(event.pos())
+        if mode:
+            self._drag_mode = mode
+            self._drag_anchor = event.pos()
+            self._drag_crop0 = self._crop
+
+    def mouseMoveEvent(self, event):
+        if not self._crop:
+            return
+        if not self._drag_mode:
+            hit = self._hit(event.pos())
+            self.setCursor(self._CURSOR.get(hit, Qt.CursorShape.ArrowCursor)
+                           if hit else Qt.CursorShape.ArrowCursor)
+            return
+
+        s = self._scale
+        if s <= 0:
+            return
+        delta = event.pos() - self._drag_anchor
+        dx = round(delta.x() / s)
+        dy = round(delta.y() / s)
+        cw, ch, cx, cy = self._drag_crop0
+        W, H = self._orig_w, self._orig_h
+
+        def snap(v):   return v - (v % 2)
+        def clamp(v, lo, hi): return max(lo, min(hi, snap(v)))
+
+        m = self._drag_mode
+        if m == "move":
+            cx = clamp(cx + dx, 0, W - cw)
+            cy = clamp(cy + dy, 0, H - ch)
+        elif m == "e":
+            cw = clamp(cw + dx, 2, W - cx)
+        elif m == "s":
+            ch = clamp(ch + dy, 2, H - cy)
+        elif m == "w":
+            ncx = clamp(cx + dx, 0, cx + cw - 2)
+            cw = max(2, snap(cw + cx - ncx)); cx = ncx
+        elif m == "n":
+            ncy = clamp(cy + dy, 0, cy + ch - 2)
+            ch = max(2, snap(ch + cy - ncy)); cy = ncy
+        elif m == "se":
+            cw = clamp(cw + dx, 2, W - cx); ch = clamp(ch + dy, 2, H - cy)
+        elif m == "sw":
+            ncx = clamp(cx + dx, 0, cx + cw - 2); cw = max(2, snap(cw + cx - ncx)); cx = ncx
+            ch = clamp(ch + dy, 2, H - cy)
+        elif m == "ne":
+            cw = clamp(cw + dx, 2, W - cx)
+            ncy = clamp(cy + dy, 0, cy + ch - 2); ch = max(2, snap(ch + cy - ncy)); cy = ncy
+        elif m == "nw":
+            ncx = clamp(cx + dx, 0, cx + cw - 2); cw = max(2, snap(cw + cx - ncx)); cx = ncx
+            ncy = clamp(cy + dy, 0, cy + ch - 2); ch = max(2, snap(ch + cy - ncy)); cy = ncy
+
+        self._crop = (cw, ch, cx, cy)
+        self._redraw()
+        self.crop_changed.emit(cw, ch, cx, cy)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_mode:
+            if self._crop:
+                self.crop_committed.emit(*self._crop)
+            self._drag_mode = self._drag_anchor = self._drag_crop0 = None
+
+
+# ---------------------------------------------------------------------------
 # Preview panel
 # ---------------------------------------------------------------------------
 
@@ -678,10 +905,15 @@ class PreviewPanel(QWidget):
             hdr.setStyleSheet("font-weight: bold;")
             col.addWidget(hdr)
 
-            img_lbl = QLabel()
-            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            img_lbl.setStyleSheet("background: #000;")
-            img_lbl.setMinimumSize(200, 150)
+            if img_attr == "lbl_orig_img":
+                img_lbl = CropCanvas()
+                img_lbl.crop_changed.connect(self._on_canvas_crop_changed)
+                img_lbl.crop_committed.connect(self._on_canvas_crop_committed)
+            else:
+                img_lbl = QLabel()
+                img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                img_lbl.setStyleSheet("background: #000;")
+                img_lbl.setMinimumSize(200, 150)
             setattr(self, img_attr, img_lbl)
 
             scroll = QScrollArea()
@@ -787,7 +1019,8 @@ class PreviewPanel(QWidget):
         if not self._orig_pixmap or self._orig_pixmap.isNull():
             return
         crop = self._crop_from_spinboxes()
-        self._draw_overlay(self._orig_pixmap, crop)
+        cw, ch, cx, cy = parse_crop(crop)
+        self.lbl_orig_img.set_crop((cw, ch, cx, cy))
         self._update_info_label(crop)
 
     def _update_info_label(self, crop: str):
@@ -887,7 +1120,7 @@ class PreviewPanel(QWidget):
         self.cb_aspect.setEnabled(enabled)
 
     def _clear_images(self):
-        self.lbl_orig_img.clear()
+        self.lbl_orig_img.clear_frame()
         self.lbl_crop_img.clear()
         self.lbl_orig_size.setText("")
         self.lbl_crop_size.setText("")
@@ -933,37 +1166,13 @@ class PreviewPanel(QWidget):
             self.lbl_crop_size.setText("")
 
     def _draw_overlay(self, pixmap: QPixmap, crop: str):
-        """Draw a semi-transparent dark mask outside the crop area + red border."""
+        """Load source frame into the CropCanvas with the current crop overlay."""
         if pixmap.isNull():
             return
-        full_w, full_h = pixmap.width(), pixmap.height()
         cw, ch, cx, cy = parse_crop(crop)
-
-        overlay = QPixmap(pixmap)
-        painter = QPainter(overlay)
-
-        # Dim everything outside the crop rectangle
-        painter.setOpacity(0.55)
-        painter.fillRect(0, 0, full_w, full_h, QColor(0, 0, 0))
-
-        # Restore the crop area at full brightness
-        painter.setOpacity(1.0)
-        painter.drawPixmap(cx, cy, pixmap, cx, cy, cw, ch)
-
-        # Red border around the crop area
-        painter.setPen(QPen(Qt.GlobalColor.red, 2))
-        painter.drawRect(cx, cy, cw - 1, ch - 1)
-        painter.end()
-
-        available_w = self.scroll_orig.viewport().width() - 4
-        if available_w > 50 and overlay.width() > available_w:
-            overlay = overlay.scaledToWidth(
-                available_w, Qt.TransformationMode.SmoothTransformation
-            )
-
-        self.lbl_orig_img.setPixmap(overlay)
-        self.lbl_orig_img.adjustSize()
-        self.lbl_orig_size.setText(f"{full_w}×{full_h}")
+        avail_w = max(50, self.scroll_orig.viewport().width() - 4)
+        self.lbl_orig_img.load_frame(pixmap, (cw, ch, cx, cy), avail_w)
+        self.lbl_orig_size.setText(f"{pixmap.width()}×{pixmap.height()}")
 
     def _show_cropped(self, img_path: str):
         pixmap = QPixmap(img_path)
@@ -978,6 +1187,40 @@ class PreviewPanel(QWidget):
         self.lbl_crop_img.setPixmap(pixmap)
         self.lbl_crop_img.adjustSize()
         self.lbl_crop_size.setText(f"{full_w}×{full_h}")
+
+    def _on_canvas_crop_changed(self, cw: int, ch: int, cx: int, cy: int):
+        """Called continuously while the user drags the crop overlay."""
+        self._suppress_spinbox_signals = True
+        self.sp_w.setValue(cw)
+        self.sp_h.setValue(ch)
+        self.sp_x.setValue(cx)
+        self.sp_y.setValue(cy)
+        if self.cb_aspect.currentIndex() != 0:
+            self.cb_aspect.setCurrentIndex(0)
+            self.lbl_ar_info.setText("Free edit — drag to adjust")
+        self._suppress_spinbox_signals = False
+        crop = f"crop={cw}:{ch}:{cx}:{cy}"
+        if self._current_info:
+            self._current_info["crop"] = crop
+        self._update_info_label(crop)
+
+    def _on_canvas_crop_committed(self, cw: int, ch: int, cx: int, cy: int):
+        """Called once when the user releases the mouse after dragging."""
+        info = self._current_info
+        if not info:
+            return
+        crop = f"crop={cw}:{ch}:{cx}:{cy}"
+        info["crop"] = crop
+        timestamp = self.slider.value()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            crop_path = extract_frame(info["path"], timestamp, crop)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if crop_path:
+            self._tmp_files.append(crop_path)
+            self._show_cropped(crop_path)
+        self.crop_changed.emit(info["path"], crop)
 
     def _apply_crop(self):
         info = self._current_info

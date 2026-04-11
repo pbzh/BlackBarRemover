@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BlackBar Remove</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+
+<!-- Titlebar (macOS traffic-lights live here) -->
+<div id="titlebar">BlackBar Remove</div>
+
+<div id="app">
+
+  <!-- ── Top controls ──────────────────────────────────── -->
+  <div id="top-controls">
+
+    <!-- Input card -->
+    <div class="card" id="input-card">
+      <div class="card-label">Input</div>
+      <div class="card-body">
+        <div class="mode-row">
+          <label><input type="radio" name="mode" id="mode-file"   checked> Single File</label>
+          <label><input type="radio" name="mode" id="mode-folder">          Folder (Batch)</label>
+        </div>
+        <div class="path-row">
+          <input type="text" id="input-path" placeholder="Select a video file or folder…" style="flex:1">
+          <button id="btn-browse">Browse…</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings card -->
+    <div class="card" id="settings-card">
+      <div class="card-body">
+        <div class="setting-group">
+          <span class="lbl">HW Mode</span>
+          <select id="hw-mode"></select>
+        </div>
+        <div class="setting-group">
+          <span class="lbl">Quality</span>
+          <input type="number" id="quality" min="1" max="51" value="23"
+                 title="1 = best quality / largest file · 51 = smallest&#10;QSV: global_quality · VT: mapped 0–1 · CPU: CRF">
+        </div>
+        <div class="setting-group">
+          <span class="lbl">Preset</span>
+          <select id="preset"></select>
+        </div>
+        <label title="QSV look-ahead for better rate control quality">
+          <input type="checkbox" id="lookahead" checked> Look-ahead
+        </label>
+        <div class="setting-group">
+          <span class="lbl">Sample (s)</span>
+          <input type="number" id="interval" min="1" max="120" value="15"
+                 title="Seconds between frames sampled for black-bar detection">
+        </div>
+        <div class="setting-group">
+          <span class="lbl">Suffix</span>
+          <input type="text" id="suffix" value="_nocrop" style="width:80px">
+        </div>
+        <label><input type="checkbox" id="overwrite"> Overwrite original</label>
+      </div>
+    </div>
+
+  </div><!-- /top-controls -->
+
+  <!-- ── File table ──────────────────────────────────────── -->
+  <div id="table-wrap">
+    <table id="file-table">
+      <thead>
+        <tr>
+          <th style="width:240px">File</th>
+          <th style="width:86px">Resolution</th>
+          <th style="width:80px">Codec</th>
+          <th style="width:170px">Detected Crop</th>
+          <th style="width:100px">New Res</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="file-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- ── Preview ─────────────────────────────────────────── -->
+  <div id="preview-area">
+
+    <div id="preview-info">Select a file and run detection, then click Preview</div>
+
+    <!-- Side-by-side frames -->
+    <div id="preview-images">
+      <div class="preview-col">
+        <div class="preview-col-header">Original — crop highlighted</div>
+        <div class="canvas-wrap">
+          <canvas id="canvas-orig"></canvas>
+          <div class="no-frame" id="no-orig">No frame loaded</div>
+        </div>
+        <div class="frame-size" id="orig-size"></div>
+      </div>
+      <div class="preview-col">
+        <div class="preview-col-header">After Crop</div>
+        <div class="canvas-wrap">
+          <canvas id="canvas-crop"></canvas>
+          <div class="no-frame" id="no-crop">No frame loaded</div>
+        </div>
+        <div class="frame-size" id="crop-size"></div>
+      </div>
+    </div>
+
+    <!-- Scrubber -->
+    <div id="scrubber-row">
+      <span class="time-lbl" id="time-current">0:00:00</span>
+      <input type="range" id="scrubber" min="0" max="100" value="0" disabled>
+      <span class="time-lbl right" id="time-total">0:00:00</span>
+    </div>
+
+    <!-- Crop controls -->
+    <div id="crop-controls">
+      <label>Aspect Ratio <select id="aspect-ratio" disabled></select></label>
+      <span id="ar-info"></span>
+      <label>W <input type="number" id="sp-w" min="2" max="9999" step="2" disabled></label>
+      <label>H <input type="number" id="sp-h" min="2" max="9999" step="2" disabled></label>
+      <label>X <input type="number" id="sp-x" min="0" max="9999" step="2" disabled></label>
+      <label>Y <input type="number" id="sp-y" min="0" max="9999" step="2" disabled></label>
+      <button id="btn-apply" disabled title="Apply crop values and refresh preview">Apply</button>
+      <button id="btn-reset" disabled title="Reset to auto-detected crop">Reset</button>
+    </div>
+
+  </div><!-- /preview-area -->
+
+  <!-- ── Bottom strip ────────────────────────────────────── -->
+  <div id="bottom-strip">
+    <div id="action-row">
+      <button id="btn-detect"  class="primary">Detect Black Bars</button>
+      <button id="btn-preview" disabled>Preview</button>
+      <button id="btn-process" class="primary" disabled>Process</button>
+      <button id="btn-cancel"  class="danger"  disabled>Cancel</button>
+      <div id="progress-wrap">
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <span class="progress-text" id="progress-text">0%</span>
+      </div>
+    </div>
+    <div id="status-line"></div>
+  </div>
+
+</div><!-- /app -->
+<script src="/src/app.js"></script>
+</body>
+</html>
