@@ -12,6 +12,7 @@ import sys
 import tempfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QProcess, QRect, Qt, QTimer, pyqtSignal
@@ -183,8 +184,8 @@ def find_ffmpeg_tool(name: str) -> str:
     return name
 
 
-def check_qsv_available() -> bool:
-    """Return True if FFmpeg was built with QSV support and the Intel GPU is accessible."""
+def check_hw_available() -> set[str]:
+    """Return the set of hardware accelerators available in this FFmpeg build."""
     try:
         result = subprocess.run(
             [FFMPEG, "-hide_banner", "-hwaccels"],
@@ -192,23 +193,10 @@ def check_qsv_available() -> bool:
             text=True,
             timeout=10,
         )
-        return "qsv" in result.stdout.lower()
+        out = result.stdout.lower()
+        return {name for name in ("qsv", "videotoolbox") if name in out}
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
-
-
-def check_vt_available() -> bool:
-    """Return True if FFmpeg was built with VideoToolbox support."""
-    try:
-        result = subprocess.run(
-            [FFMPEG, "-hide_banner", "-hwaccels"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return "videotoolbox" in result.stdout.lower()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
+        return set()
 
 
 FFMPEG = find_ffmpeg_tool("ffmpeg")
@@ -221,12 +209,15 @@ FFPROBE = find_ffmpeg_tool("ffprobe")
 
 
 def parse_crop(crop_str: str) -> tuple[int, int, int, int]:
-    """Parse 'crop=W:H:X:Y' → (W, H, X, Y)."""
-    parts = crop_str.replace("crop=", "").split(":")
-    return int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+    """Parse 'crop=W:H:X:Y' → (W, H, X, Y). Raises ValueError on malformed input."""
+    try:
+        parts = crop_str.replace("crop=", "").split(":")
+        return int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"Invalid crop string: {crop_str!r}") from exc
 
 
-def crop_to_vf_qsv_fullhw(crop_filter: str) -> str:
+def crop_to_vf_qsv_fullhw(crop_filter: str, is_10bit: bool = False) -> str:
     """Convert 'crop=W:H:X:Y' to a filter chain suitable for the full QSV HW pipeline.
 
     Strategy: after QSV hardware decode (-hwaccel_output_format qsv) the
@@ -235,17 +226,19 @@ def crop_to_vf_qsv_fullhw(crop_filter: str) -> str:
     for hardware encoding.  This avoids the fragile vpp_qsv crop parameter
     differences across FFmpeg versions while still offloading decode/encode.
     """
-    return f"hwdownload,format=nv12,{crop_filter},hwupload=extra_hw_frames=64"
+    fmt = "p010le" if is_10bit else "nv12"
+    return f"hwdownload,format={fmt},{crop_filter},hwupload=extra_hw_frames=64"
 
 
-def crop_to_vf_vt_fullhw(crop_filter: str) -> str:
+def crop_to_vf_vt_fullhw(crop_filter: str, is_10bit: bool = False) -> str:
     """Convert 'crop=W:H:X:Y' to a filter chain for the VideoToolbox full HW pipeline.
 
     With -hwaccel videotoolbox -hwaccel_output_format videotoolbox, frames
     live on GPU surfaces.  We download to system memory for the CPU crop
     filter; the VideoToolbox encoder accepts CPU frames directly.
     """
-    return f"hwdownload,format=nv12,{crop_filter}"
+    fmt = "p010le" if is_10bit else "nv12"
+    return f"hwdownload,format={fmt},{crop_filter}"
 
 
 def get_video_info(filepath: str) -> dict | None:
@@ -264,6 +257,7 @@ def get_video_info(filepath: str) -> dict | None:
             ],
             capture_output=True,
             text=True,
+            timeout=30,
         )
         data = json.loads(result.stdout)
         info: dict = {"path": filepath}
@@ -283,7 +277,7 @@ def get_video_info(filepath: str) -> dict | None:
         fmt = data.get("format", {})
         info["duration"] = float(fmt.get("duration", 0))
         return info if "video_codec" in info else None
-    except (json.JSONDecodeError, FileNotFoundError, KeyError, ValueError):
+    except (json.JSONDecodeError, FileNotFoundError, KeyError, ValueError, subprocess.TimeoutExpired):
         return None
 
 
@@ -295,23 +289,28 @@ def extract_frame(
     tmp.close()
 
     vf = crop_filter if crop_filter else "null"
-    result = subprocess.run(
-        [
-            FFMPEG,
-            "-ss",
-            str(timestamp),
-            "-i",
-            filepath,
-            "-vf",
-            vf,
-            "-frames:v",
-            "1",
-            "-y",
-            tmp.name,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                FFMPEG,
+                "-ss",
+                str(timestamp),
+                "-i",
+                filepath,
+                "-vf",
+                vf,
+                "-frames:v",
+                "1",
+                "-y",
+                tmp.name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        os.unlink(tmp.name)
+        return None
     if result.returncode == 0 and os.path.getsize(tmp.name) > 0:
         return tmp.name
     os.unlink(tmp.name)
@@ -353,6 +352,14 @@ def format_timestamp(seconds: float) -> str:
     m = (int(seconds) % 3600) // 60
     s = int(seconds) % 60
     return f"{h}:{m:02d}:{s:02d}"
+
+
+def _snap(v: int) -> int:
+    return v - (v % 2)
+
+
+def _clamp(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, _snap(v)))
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +480,7 @@ class EncodeWorker:
                         "-c:v",
                         decoder,
                     ]
-                    vf_filter = crop_to_vf_qsv_fullhw(crop_filter)
+                    vf_filter = crop_to_vf_qsv_fullhw(crop_filter, is_10bit)
                 else:
                     # No QSV decoder for this codec – still use QSV encode
                     vf_filter = crop_filter
@@ -491,7 +498,7 @@ class EncodeWorker:
                     "-hwaccel_output_format",
                     "videotoolbox",
                 ]
-                vf_filter = crop_to_vf_vt_fullhw(crop_filter)
+                vf_filter = crop_to_vf_vt_fullhw(crop_filter, is_10bit)
 
         else:  # cpu
             encoder = SW_ENCODERS.get(video_codec, "libx264")
@@ -584,6 +591,9 @@ class CropCanvas(QLabel):
         self._orig_h = 0
         self._crop: tuple[int, int, int, int] | None = None  # (cw, ch, cx, cy)
 
+        self._scaled_cache: QPixmap | None = None
+        self._scale_cache_key: tuple | None = None
+
         # drag state
         self._drag_mode: str | None = None
         self._drag_anchor: QPoint | None = None
@@ -623,10 +633,15 @@ class CropCanvas(QLabel):
         s = self._scale
         dw = round(self._orig_w * s)
         dh = round(self._orig_h * s)
-        scaled = self._src.scaled(dw, dh,
-                                   Qt.AspectRatioMode.KeepAspectRatio,
-                                   Qt.TransformationMode.SmoothTransformation)
-        overlay = QPixmap(scaled)
+        cache_key = (id(self._src), dw, dh)
+        if self._scaled_cache is None or self._scale_cache_key != cache_key:
+            self._scaled_cache = self._src.scaled(
+                dw, dh,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._scale_cache_key = cache_key
+        overlay = QPixmap(self._scaled_cache)
         p = QPainter(overlay)
 
         if self._crop:
@@ -728,34 +743,31 @@ class CropCanvas(QLabel):
         cw, ch, cx, cy = self._drag_crop0
         W, H = self._orig_w, self._orig_h
 
-        def snap(v):   return v - (v % 2)
-        def clamp(v, lo, hi): return max(lo, min(hi, snap(v)))
-
         m = self._drag_mode
         if m == "move":
-            cx = clamp(cx + dx, 0, W - cw)
-            cy = clamp(cy + dy, 0, H - ch)
+            cx = _clamp(cx + dx, 0, W - cw)
+            cy = _clamp(cy + dy, 0, H - ch)
         elif m == "e":
-            cw = clamp(cw + dx, 2, W - cx)
+            cw = _clamp(cw + dx, 2, W - cx)
         elif m == "s":
-            ch = clamp(ch + dy, 2, H - cy)
+            ch = _clamp(ch + dy, 2, H - cy)
         elif m == "w":
-            ncx = clamp(cx + dx, 0, cx + cw - 2)
-            cw = max(2, snap(cw + cx - ncx)); cx = ncx
+            ncx = _clamp(cx + dx, 0, cx + cw - 2)
+            cw = max(2, _snap(cw + cx - ncx)); cx = ncx
         elif m == "n":
-            ncy = clamp(cy + dy, 0, cy + ch - 2)
-            ch = max(2, snap(ch + cy - ncy)); cy = ncy
+            ncy = _clamp(cy + dy, 0, cy + ch - 2)
+            ch = max(2, _snap(ch + cy - ncy)); cy = ncy
         elif m == "se":
-            cw = clamp(cw + dx, 2, W - cx); ch = clamp(ch + dy, 2, H - cy)
+            cw = _clamp(cw + dx, 2, W - cx); ch = _clamp(ch + dy, 2, H - cy)
         elif m == "sw":
-            ncx = clamp(cx + dx, 0, cx + cw - 2); cw = max(2, snap(cw + cx - ncx)); cx = ncx
-            ch = clamp(ch + dy, 2, H - cy)
+            ncx = _clamp(cx + dx, 0, cx + cw - 2); cw = max(2, _snap(cw + cx - ncx)); cx = ncx
+            ch = _clamp(ch + dy, 2, H - cy)
         elif m == "ne":
-            cw = clamp(cw + dx, 2, W - cx)
-            ncy = clamp(cy + dy, 0, cy + ch - 2); ch = max(2, snap(ch + cy - ncy)); cy = ncy
+            cw = _clamp(cw + dx, 2, W - cx)
+            ncy = _clamp(cy + dy, 0, cy + ch - 2); ch = max(2, _snap(ch + cy - ncy)); cy = ncy
         elif m == "nw":
-            ncx = clamp(cx + dx, 0, cx + cw - 2); cw = max(2, snap(cw + cx - ncx)); cx = ncx
-            ncy = clamp(cy + dy, 0, cy + ch - 2); ch = max(2, snap(ch + cy - ncy)); cy = ncy
+            ncx = _clamp(cx + dx, 0, cx + cw - 2); cw = max(2, _snap(cw + cx - ncx)); cx = ncx
+            ncy = _clamp(cy + dy, 0, cy + ch - 2); ch = max(2, _snap(ch + cy - ncy)); cy = ncy
 
         self._crop = (cw, ch, cx, cy)
         self._redraw()
@@ -784,6 +796,7 @@ class PreviewPanel(QWidget):
         self._current_info: dict | None = None
         self._orig_pixmap: QPixmap | None = None
         self._suppress_spinbox_signals = False
+        self._frame_load_gen = 0
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -937,6 +950,9 @@ class PreviewPanel(QWidget):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def cleanup(self):
+        self._cleanup_tmp()
+
     def _cleanup_tmp(self):
         for f in self._tmp_files:
             try:
@@ -1051,6 +1067,7 @@ class PreviewPanel(QWidget):
     # ------------------------------------------------------------------
 
     def load_file(self, info: dict):
+        self._frame_load_gen += 1
         self._cleanup_tmp()
         self._orig_pixmap = None
         self._current_info = info
@@ -1096,6 +1113,7 @@ class PreviewPanel(QWidget):
         self._update_frames()
 
     def clear(self):
+        self._frame_load_gen += 1
         self._cleanup_tmp()
         self._current_info = None
         self._orig_pixmap = None
@@ -1139,15 +1157,31 @@ class PreviewPanel(QWidget):
         self._cleanup_tmp()
         timestamp = self.slider.value()
         crop = info["crop"]
+        path = info["path"]
+
+        self._frame_load_gen += 1
+        gen = self._frame_load_gen
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
+
+        def _load():
             with ThreadPoolExecutor(max_workers=2) as pool:
-                f_orig = pool.submit(extract_frame, info["path"], timestamp)
-                f_crop = pool.submit(extract_frame, info["path"], timestamp, crop)
+                f_orig = pool.submit(extract_frame, path, timestamp)
+                f_crop = pool.submit(extract_frame, path, timestamp, crop)
                 orig_path = f_orig.result()
                 crop_path = f_crop.result()
-        finally:
-            QApplication.restoreOverrideCursor()
+            QTimer.singleShot(0, lambda: self._on_frames_loaded(gen, orig_path, crop_path, crop))
+
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _on_frames_loaded(self, gen: int, orig_path, crop_path, crop: str):
+        QApplication.restoreOverrideCursor()
+        if gen != self._frame_load_gen:
+            for p in filter(None, (orig_path, crop_path)):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            return
 
         if orig_path:
             self._tmp_files.append(orig_path)
@@ -1158,6 +1192,40 @@ class PreviewPanel(QWidget):
             self.lbl_orig_size.setText("")
             self._orig_pixmap = None
 
+        if crop_path:
+            self._tmp_files.append(crop_path)
+            self._show_cropped(crop_path)
+        else:
+            self.lbl_crop_img.setText("Failed to extract frame")
+            self.lbl_crop_size.setText("")
+
+    def _load_crop_frame_async(self, crop: str):
+        """Extract the cropped frame in a background thread and update the right panel."""
+        info = self._current_info
+        if not info:
+            return
+        self._cleanup_tmp()
+        timestamp = self.slider.value()
+        path = info["path"]
+        self._frame_load_gen += 1
+        gen = self._frame_load_gen
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        def _load():
+            crop_path = extract_frame(path, timestamp, crop)
+            QTimer.singleShot(0, lambda: self._on_crop_frame_loaded(gen, crop_path))
+
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _on_crop_frame_loaded(self, gen: int, crop_path):
+        QApplication.restoreOverrideCursor()
+        if gen != self._frame_load_gen:
+            if crop_path:
+                try:
+                    os.unlink(crop_path)
+                except OSError:
+                    pass
+            return
         if crop_path:
             self._tmp_files.append(crop_path)
             self._show_cropped(crop_path)
@@ -1211,15 +1279,7 @@ class PreviewPanel(QWidget):
             return
         crop = f"crop={cw}:{ch}:{cx}:{cy}"
         info["crop"] = crop
-        timestamp = self.slider.value()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            crop_path = extract_frame(info["path"], timestamp, crop)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if crop_path:
-            self._tmp_files.append(crop_path)
-            self._show_cropped(crop_path)
+        self._load_crop_frame_async(crop)
         self.crop_changed.emit(info["path"], crop)
 
     def _apply_crop(self):
@@ -1229,17 +1289,9 @@ class PreviewPanel(QWidget):
         new_crop = self._crop_from_spinboxes()
         info["crop"] = new_crop
         self._update_info_label(new_crop)
-        timestamp = self.slider.value()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            crop_path = extract_frame(info["path"], timestamp, new_crop)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if crop_path:
-            self._tmp_files.append(crop_path)
-            self._show_cropped(crop_path)
         if self._orig_pixmap and not self._orig_pixmap.isNull():
             self._draw_overlay(self._orig_pixmap, new_crop)
+        self._load_crop_frame_async(new_crop)
         self.crop_changed.emit(info["path"], new_crop)
 
     def _reset_crop(self):
@@ -1257,17 +1309,9 @@ class PreviewPanel(QWidget):
         cw, ch, *_ = parse_crop(auto_crop)
         self.lbl_ar_info.setText(f"Auto-detected: {cw}×{ch} ({cw / ch:.3f}:1)")
         self._update_info_label(auto_crop)
-        timestamp = self.slider.value()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            crop_path = extract_frame(info["path"], timestamp, auto_crop)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if crop_path:
-            self._tmp_files.append(crop_path)
-            self._show_cropped(crop_path)
         if self._orig_pixmap and not self._orig_pixmap.isNull():
             self._draw_overlay(self._orig_pixmap, auto_crop)
+        self._load_crop_frame_async(auto_crop)
         self.crop_changed.emit(info["path"], auto_crop)
 
 
@@ -1289,9 +1333,11 @@ class BlackBarRemoveApp(QMainWindow):
         self._detect_index = 0
         self._active_detect_count = 0
         self._encode_index = 0
+        self._lookahead_saved = True
 
         self._build_ui()
         self._check_ffmpeg_on_startup()
+        self._on_hw_mode_changed(0)
 
     # ------------------------------------------------------------------
     # Startup checks
@@ -1312,10 +1358,11 @@ class BlackBarRemoveApp(QMainWindow):
             )
             return
 
+        hw_found = check_hw_available()
         hw_available = []
-        if sys.platform in ("win32", "linux") and check_qsv_available():
+        if sys.platform in ("win32", "linux") and "qsv" in hw_found:
             hw_available.append("QSV")
-        if sys.platform == "darwin" and check_vt_available():
+        if sys.platform == "darwin" and "videotoolbox" in hw_found:
             hw_available.append("VideoToolbox")
 
         if hw_available:
@@ -1526,11 +1573,14 @@ class BlackBarRemoveApp(QMainWindow):
 
     def _on_hw_mode_changed(self, _index: int):
         mode = self._hw_mode_key()
-        # Look-ahead is only meaningful for QSV HW Encode mode
-        self.chk_lookahead.setEnabled(mode == "qsv")
-        if mode != "qsv":
+        if mode == "qsv":
+            self.chk_lookahead.setEnabled(True)
+            self.chk_lookahead.setChecked(self._lookahead_saved)
+        else:
+            if self.chk_lookahead.isEnabled():
+                self._lookahead_saved = self.chk_lookahead.isChecked()
+            self.chk_lookahead.setEnabled(False)
             self.chk_lookahead.setChecked(False)
-        # Presets don't apply to VideoToolbox
         self.cb_preset.setEnabled(mode not in ("vt", "vt_fullhw"))
 
     # ------------------------------------------------------------------
@@ -1604,10 +1654,14 @@ class BlackBarRemoveApp(QMainWindow):
             self._log(f"Invalid path: {path}")
             return
 
-        for fp in paths:
-            info = get_video_info(str(fp))
-            if info:
-                self.files.append(info)
+        str_paths = [str(fp) for fp in paths]
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            with ThreadPoolExecutor(max_workers=min(8, len(str_paths))) as pool:
+                results = list(pool.map(get_video_info, str_paths))
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.files.extend(info for info in results if info)
 
         self.table.setRowCount(len(self.files))
         for i, info in enumerate(self.files):
@@ -1855,7 +1909,7 @@ class BlackBarRemoveApp(QMainWindow):
 
     def _on_encode_done(self, filepath: str, success: bool):
         info = self.encode_queue[self._encode_index]
-        row = self.files.index(info)
+        row = info["_row"]
         p = Path(filepath)
 
         if success:
@@ -1897,7 +1951,7 @@ class BlackBarRemoveApp(QMainWindow):
         if self.encode_worker and self.encode_worker.process.state() != QProcess.ProcessState.NotRunning:
             self.encode_worker.process.kill()
             self.encode_worker.process.waitForFinished(2000)
-        self.preview._cleanup_tmp()
+        self.preview.cleanup()
         super().closeEvent(event)
 
 
