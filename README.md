@@ -21,10 +21,12 @@ A desktop application that detects and removes black bars (letterboxing and pill
   |------|-------------|
   | QSV – HW Encode | Software decode + Intel QSV hardware encode (most compatible) |
   | QSV – Full HW Pipeline | QSV decode + crop + QSV encode (fastest; requires a QSV-capable decoder) |
+  | AMF (AMD) – HW Encode | Software decode + AMD AMF hardware encode (RDNA/RDNA2/RDNA3/RDNA4 GPUs incl. RX 9070 XT) |
+  | AMF (AMD) – Full HW Pipeline | D3D11VA (Windows) / VAAPI (Linux) decode + crop + AMF encode |
   | VideoToolbox – HW Encode | Software decode + Apple VideoToolbox hardware encode on macOS |
   | VideoToolbox – Full HW Pipeline | VideoToolbox decode + crop + encode on macOS |
   | CPU – Software | libx264 / libx265 fully in software (universal fallback) |
-- **Quality & preset controls** — global_quality (QSV) or CRF (CPU), plus speed preset
+- **Quality & preset controls** — global_quality (QSV), CQP (AMF), VideoToolbox quality, or CRF (CPU), plus speed preset
 - **Look-ahead** toggle for better QSV rate control
 - **Overwrite original** option (encodes to a temp file, then replaces with backup/restore protection)
 - **Per-file status** table with live encoding progress bar
@@ -89,6 +91,17 @@ QSV modes require:
 - Up-to-date Intel graphics drivers
 
 If QSV is unavailable the app warns on startup and **CPU mode still works normally**.
+
+#### AMD AMF (Advanced Media Framework)
+AMF modes require:
+- An AMD GPU with VCN encode support (Polaris RX 400 series and newer; RDNA1/2/3/4 incl. RX 9070 XT all supported)
+- **Windows**: AMD Adrenalin drivers installed
+- **Linux**: Mesa with VA-API and the `amdgpu` kernel driver
+- An FFmpeg build with `--enable-amf` (BtbN GPL builds include this on Windows)
+
+AV1 encode (`av1_amf`) requires RDNA3 or newer (RX 7000 / RX 9000 series). HEVC and H.264 work on older RDNA generations as well.
+
+If AMF is unavailable the app warns on startup; CPU mode still works.
 
 #### Apple VideoToolbox
 VideoToolbox modes require macOS and an FFmpeg build with VideoToolbox support. Homebrew FFmpeg is usually sufficient:
@@ -162,15 +175,15 @@ wails build
 
 ## Codec Support Matrix
 
-| Source Codec | QSV Decoder | QSV Encoder | CPU Fallback |
-|---|---|---|---|
-| H.264 (8-bit) | `h264_qsv` | `h264_qsv` | `libx264` |
-| H.264 (10-bit) | `h264_qsv` | *(falls back to CPU)* | `libx264` |
-| HEVC / H.265 | `hevc_qsv` | `hevc_qsv` | `libx265` |
-| AV1 | `av1_qsv` | `av1_qsv` | — |
-| VP9 | `vp9_qsv` | — | `libvpx-vp9` |
-| MPEG-2 | `mpeg2_qsv` | — | — |
-| VC-1 | `vc1_qsv` | — | — |
+| Source Codec | QSV Decoder | QSV Encoder | AMF Encoder | CPU Fallback |
+|---|---|---|---|---|
+| H.264 (8-bit) | `h264_qsv` | `h264_qsv` | `h264_amf` | `libx264` |
+| H.264 (10-bit) | `h264_qsv` | *(falls back to CPU)* | *(falls back to CPU)* | `libx264` |
+| HEVC / H.265 | `hevc_qsv` | `hevc_qsv` | `hevc_amf` | `libx265` |
+| AV1 | `av1_qsv` | `av1_qsv` | `av1_amf` (RDNA3+) | — |
+| VP9 | `vp9_qsv` | — | — | `libvpx-vp9` |
+| MPEG-2 | `mpeg2_qsv` | — | — | — |
+| VC-1 | `vc1_qsv` | — | — | — |
 
 Audio and subtitle streams are always copied without re-encoding.
 
@@ -227,6 +240,9 @@ Install a QSV-enabled FFmpeg build (see [Requirements](#requirements)) and updat
 
 **Encoding error with QSV**
 Some codec/format combinations lack a QSV encoder. Switch to **CPU – Software** mode; the FFmpeg error shown in the status log should identify the exact failure.
+
+**Encoding error with AMF**
+`av1_amf` only runs on RDNA3 (RX 7000) or newer GPUs. For older AMD cards, pick HEVC/H.264 source codecs or switch to **CPU – Software**. Update Adrenalin drivers if AMF reports `NotSupported`.
 
 **Encoding error with VideoToolbox**
 Some codecs or pixel formats are not supported by VideoToolbox. Switch to **CPU – Software** mode or use a source format supported by the VideoToolbox encoder.
