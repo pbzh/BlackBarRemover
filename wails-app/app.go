@@ -156,15 +156,71 @@ func (a *App) LoadFiles(path string) []*VideoInfo {
 	return results
 }
 
+func (a *App) snapshotFiles() []*VideoInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	files := make([]*VideoInfo, len(a.files))
+	for i, info := range a.files {
+		if info == nil {
+			continue
+		}
+		copyInfo := *info
+		files[i] = &copyInfo
+	}
+	return files
+}
+
+func (a *App) updateDetectedCrop(path, crop string) {
+	if crop == "" {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, info := range a.files {
+		if info != nil && info.Path == path {
+			info.Crop = crop
+			info.CropAuto = crop
+			return
+		}
+	}
+}
+
+func replaceFile(srcPath, dstPath string) error {
+	if err := os.Rename(srcPath, dstPath); err == nil {
+		return nil
+	} else if !os.IsExist(err) && runtime.GOOS != "windows" {
+		return err
+	}
+
+	backupPath := dstPath + ".bbr_backup"
+	for i := 1; ; i++ {
+		if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+			break
+		}
+		backupPath = fmt.Sprintf("%s.bbr_backup.%d", dstPath, i)
+	}
+
+	if err := os.Rename(dstPath, backupPath); err != nil {
+		return err
+	}
+	if err := os.Rename(srcPath, dstPath); err != nil {
+		if restoreErr := os.Rename(backupPath, dstPath); restoreErr != nil {
+			return fmt.Errorf("%w; also failed to restore original: %v", err, restoreErr)
+		}
+		return err
+	}
+	_ = os.Remove(backupPath)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // StartDetection
 // ---------------------------------------------------------------------------
 
 func (a *App) StartDetection(sampleInterval int) {
-	a.mu.Lock()
-	files := make([]*VideoInfo, len(a.files))
-	copy(files, a.files)
-	a.mu.Unlock()
+	files := a.snapshotFiles()
 
 	if len(files) == 0 {
 		a.log("No files loaded.")
@@ -207,10 +263,7 @@ func (a *App) StartDetection(sampleInterval int) {
 				crop := runCropDetect(ctx, a.ffmpeg, fi.Path, sampleInterval)
 				done := atomic.AddInt64(&doneCount, 1)
 
-				if crop != "" {
-					fi.Crop = crop
-					fi.CropAuto = crop
-				}
+				a.updateDetectedCrop(fi.Path, crop)
 
 				a.emit("detect:result", map[string]interface{}{
 					"row":      row,
@@ -232,10 +285,7 @@ func (a *App) StartDetection(sampleInterval int) {
 // ---------------------------------------------------------------------------
 
 func (a *App) StartProcessing(settings EncodeSettings) {
-	a.mu.Lock()
-	files := make([]*VideoInfo, len(a.files))
-	copy(files, a.files)
-	a.mu.Unlock()
+	files := a.snapshotFiles()
 
 	type qItem struct {
 		info    *VideoInfo
@@ -304,7 +354,7 @@ func (a *App) StartProcessing(settings EncodeSettings) {
 			args := buildEncodeArgs(info.Path, outPath, info.Crop, settings.HWMode,
 				info, settings.Quality, settings.LookAhead, settings.Preset)
 
-			success := runEncode(ctx, a.ffmpeg, args, info.Duration, func(pct float64) {
+			success, errText := runEncode(ctx, a.ffmpeg, args, info.Duration, func(pct float64) {
 				a.emit("encode:progress", map[string]interface{}{
 					"row": item.origIdx,
 					"pct": pct,
@@ -312,8 +362,9 @@ func (a *App) StartProcessing(settings EncodeSettings) {
 			})
 
 			if success && settings.Overwrite {
-				if err := os.Rename(outPath, info.Path); err != nil {
+				if err := replaceFile(outPath, info.Path); err != nil {
 					a.log(fmt.Sprintf("Warning: could not replace original: %v", err))
+					success = false
 				} else {
 					a.log(fmt.Sprintf("  Replaced original: %s", info.Name))
 				}
@@ -332,6 +383,9 @@ func (a *App) StartProcessing(settings EncodeSettings) {
 				a.log(fmt.Sprintf("  Finished: %s", info.Name))
 			} else {
 				a.log(fmt.Sprintf("  Error encoding: %s (try CPU mode)", info.Name))
+				if errText != "" {
+					a.log(fmt.Sprintf("  ffmpeg: %s", errText))
+				}
 			}
 		}
 

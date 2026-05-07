@@ -1,9 +1,10 @@
 # BlackBar Remover
 
-A Windows desktop GUI application that detects and removes black bars (letterboxing and pillarboxing) from video files. Built with PyQt6 and powered by FFmpeg, with first-class support for Intel Quick Sync Video (QSV) hardware acceleration.
+A desktop application that detects and removes black bars (letterboxing and pillarboxing) from video files. The current GUI is a Wails app with a Go backend, a lightweight HTML/CSS/JS frontend, and FFmpeg/FFprobe for media analysis and encoding.
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Platform](https://img.shields.io/badge/Platform-Windows-blue)
+![Go](https://img.shields.io/badge/Go-1.22%2B-blue)
+![Wails](https://img.shields.io/badge/Wails-v2-blue)
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 ![FFmpeg](https://img.shields.io/badge/FFmpeg-required-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -15,27 +16,42 @@ A Windows desktop GUI application that detects and removes black bars (letterbox
 - **Side-by-side preview** with a time scrubber — see the original and cropped frame before committing
 - **Manual crop editor** — override detected values with exact W/H/X/Y spinboxes or pick a standard aspect ratio
 - **Batch processing** — drop a whole folder; detection runs up to 4 files in parallel
-- **Three encoding modes**:
+- **Hardware-aware encoding modes**:
   | Mode | Description |
   |------|-------------|
   | QSV – HW Encode | Software decode + Intel QSV hardware encode (most compatible) |
   | QSV – Full HW Pipeline | QSV decode + crop + QSV encode (fastest; requires a QSV-capable decoder) |
+  | VideoToolbox – HW Encode | Software decode + Apple VideoToolbox hardware encode on macOS |
+  | VideoToolbox – Full HW Pipeline | VideoToolbox decode + crop + encode on macOS |
   | CPU – Software | libx264 / libx265 fully in software (universal fallback) |
 - **Quality & preset controls** — global_quality (QSV) or CRF (CPU), plus speed preset
 - **Look-ahead** toggle for better QSV rate control
-- **Overwrite original** option (encodes to a temp file, then atomically replaces)
+- **Overwrite original** option (encodes to a temp file, then replaces with backup/restore protection)
 - **Per-file status** table with live encoding progress bar
 
 ---
 
 ## Requirements
 
-### Python
-- Python 3.11 or newer
-- PyQt6
+### Wails app
+
+- Go 1.22 or newer
+- Wails v2 CLI
+- FFmpeg and FFprobe available on `PATH` or in a known install location
+
+Install Wails:
+
+```bash
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+```
+
+### Legacy Python app
+
+The repository still includes `blackbar_remove.py`, the original PyQt6 implementation. Use it only if you specifically want the Python version.
 
 ```bash
 pip install PyQt6
+python blackbar_remove.py
 ```
 
 ### FFmpeg
@@ -44,11 +60,10 @@ FFmpeg must be installed and accessible. The application searches these location
 1. System `PATH` (recommended)
 2. `C:\ffmpeg\bin\`
 3. `C:\Program Files\ffmpeg\bin\`
-4. `C:\Program Files (x86)\ffmpeg\bin\`
-5. `~\ffmpeg\bin\`
-6. Scoop: `~\scoop\apps\ffmpeg\current\bin\`
-7. Chocolatey: `C:\ProgramData\chocolatey\bin\`
-8. winget default install path
+4. `~\ffmpeg\bin\`
+5. Scoop: `~\scoop\apps\ffmpeg\current\bin\`
+6. macOS Homebrew: `/opt/homebrew/bin/` or `/usr/local/bin/`
+7. Linux: `/usr/bin/`, `/usr/local/bin/`, `/snap/bin/`, or `~/bin/`
 
 #### Recommended FFmpeg build (includes QSV support)
 Download a full build from **[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)** — choose a `ffmpeg-master-latest-win64-gpl` release.
@@ -65,13 +80,22 @@ scoop install ffmpeg
 choco install ffmpeg
 ```
 
-### Intel Quick Sync Video (optional)
+### Hardware acceleration (optional)
+
+#### Intel Quick Sync Video
 QSV modes require:
 - An Intel CPU or GPU with Quick Sync support (6th gen "Skylake" or newer recommended)
 - An FFmpeg build compiled with `--enable-libmfx` or `--enable-qsv`
 - Up-to-date Intel graphics drivers
 
 If QSV is unavailable the app warns on startup and **CPU mode still works normally**.
+
+#### Apple VideoToolbox
+VideoToolbox modes require macOS and an FFmpeg build with VideoToolbox support. Homebrew FFmpeg is usually sufficient:
+
+```bash
+brew install ffmpeg
+```
 
 ---
 
@@ -83,11 +107,20 @@ If QSV is unavailable the app warns on startup and **CPU mode still works normal
 
 ## Installation
 
+### Run the Wails app
+
 ```bash
 git clone https://github.com/pbzh/BlackBarRemover.git
 cd BlackBarRemover
-pip install PyQt6
-python blackbar_remove.py
+cd wails-app
+wails dev
+```
+
+### Build a desktop binary
+
+```bash
+cd wails-app
+wails build
 ```
 
 ---
@@ -113,12 +146,12 @@ python blackbar_remove.py
 ### 4. Configure encoding
 | Setting | Description |
 |---------|-------------|
-| HW Mode | QSV HW Encode / QSV Full HW Pipeline / CPU Software |
-| Quality | 1 (best) – 51 (smallest); maps to `global_quality` (QSV) or `CRF` (CPU) |
+| HW Mode | QSV / VideoToolbox / CPU modes, filtered by platform |
+| Quality | 1 (best) – 51 (smallest); maps to `global_quality` (QSV), VideoToolbox quality, or `CRF` (CPU) |
 | Preset | Encoding speed: `veryfast` → `veryslow` |
 | Look-ahead | Enable QSV look-ahead for better rate control (QSV HW Encode only) |
 | Suffix | String appended to output filename (default `_nocrop`) |
-| Overwrite original | Replace source file atomically after successful encode |
+| Overwrite original | Encode to a temporary file, then replace the source with backup/restore protection |
 
 ### 5. Process
 - Click **Process** — only files with detected black bars are encoded
@@ -145,6 +178,27 @@ Audio and subtitle streams are always copied without re-encoding.
 
 ## Architecture
 
+### Wails app
+
+```
+wails-app/
+├── main.go                  # Wails application setup and window options
+├── app.go                   # Wails-bound app methods, dialogs, state, events
+├── ffmpeg.go                # FFmpeg/FFprobe discovery, cropdetect, encode args, crop math
+├── frontend/
+│   ├── index.html           # Application shell
+│   └── src/
+│       ├── app.js           # UI state, Wails calls, event handlers, preview rendering
+│       └── style.css        # Desktop UI styling
+└── wails.json               # Wails build configuration
+```
+
+Detection and encoding run in Go goroutines and publish progress through Wails runtime events. Detection updates shared crop state under a mutex; processing uses immutable file snapshots for safer concurrent behavior. Preview scrubbing guards against stale asynchronous frame results so older FFmpeg frame extractions cannot overwrite newer scrub positions.
+
+Encoding captures the tail of FFmpeg stderr and logs it on failure, which makes codec, filter, permission, and hardware acceleration problems easier to diagnose.
+
+### Legacy Python app
+
 ```
 blackbar_remove.py
 ├── Constants & codec maps
@@ -159,7 +213,7 @@ blackbar_remove.py
 └── BlackBarRemoveApp        — QMainWindow, table, batch orchestration
 ```
 
-Detection and encoding both use `QProcess` (non-blocking) so the UI never freezes. Frame extraction for preview uses `ThreadPoolExecutor` to run the original and cropped extractions in parallel.
+The Python app uses `QProcess` for detection and encoding, and a `ThreadPoolExecutor` for preview frame extraction.
 
 ---
 
@@ -172,10 +226,16 @@ Add ffmpeg to your system PATH or place the binary at `C:\ffmpeg\bin\ffmpeg.exe`
 Install a QSV-enabled FFmpeg build (see [Requirements](#requirements)) and update Intel graphics drivers. Switch to **CPU – Software** mode in the meantime.
 
 **Encoding error with QSV**
-Some codec/format combinations lack a QSV encoder. Switch to **CPU – Software** mode; the error message in the log will confirm.
+Some codec/format combinations lack a QSV encoder. Switch to **CPU – Software** mode; the FFmpeg error shown in the status log should identify the exact failure.
+
+**Encoding error with VideoToolbox**
+Some codecs or pixel formats are not supported by VideoToolbox. Switch to **CPU – Software** mode or use a source format supported by the VideoToolbox encoder.
 
 **Preview shows "Failed to extract frame"**
 The timestamp may be beyond the video's duration, or the file is corrupted. Try scrubbing to a different position.
+
+**Overwrite original fails**
+The Wails app writes a temporary encoded file first, then replaces the source. If replacement fails because of file permissions, locks, or cross-device filesystem behavior, the original file is restored from a temporary backup when possible.
 
 ---
 

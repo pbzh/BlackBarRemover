@@ -44,6 +44,7 @@ let scrubTimer = null;
 let cropEditTimer = null;
 let suppressCropSignals = false;
 let platform = 'darwin';
+let previewRequestId = 0;
 
 // ---------------------------------------------------------------------------
 // DOM helpers
@@ -105,14 +106,27 @@ function buildTable() {
     let codecLabel = f.video_codec;
     if (f.is_10bit) codecLabel += ' (10-bit)';
 
-    tr.innerHTML = `
-      <td title="${f.path}">${f.name}</td>
-      <td>${f.width}×${f.height}</td>
-      <td>${codecLabel}</td>
-      <td id="td-crop-${i}"></td>
-      <td id="td-newres-${i}"></td>
-      <td id="td-status-${i}">Loaded</td>
-    `;
+    const fileTd = document.createElement('td');
+    fileTd.title = f.path;
+    fileTd.textContent = f.name;
+
+    const resTd = document.createElement('td');
+    resTd.textContent = `${f.width}×${f.height}`;
+
+    const codecTd = document.createElement('td');
+    codecTd.textContent = codecLabel;
+
+    const cropTd = document.createElement('td');
+    cropTd.id = `td-crop-${i}`;
+
+    const newResTd = document.createElement('td');
+    newResTd.id = `td-newres-${i}`;
+
+    const statusTd = document.createElement('td');
+    statusTd.id = `td-status-${i}`;
+    statusTd.textContent = 'Loaded';
+
+    tr.append(fileTd, resTd, codecTd, cropTd, newResTd, statusTd);
     tbody.appendChild(tr);
   });
 }
@@ -178,6 +192,7 @@ function selectRow(row) {
 function loadPreview(info) {
   currentPreview = info;
   origFrameData = null;
+  previewRequestId += 1;
 
   const crop = info.crop;
   if (!crop) {
@@ -227,6 +242,7 @@ function loadPreview(info) {
 function clearPreview() {
   currentPreview = null;
   origFrameData = null;
+  previewRequestId += 1;
   setPreviewInfo('Select a file and run detection, then click Preview');
   clearCanvases();
   setCropControlsEnabled(false);
@@ -305,6 +321,13 @@ async function triggerFrameUpdate() {
   const info = currentPreview;
   const timestamp = parseFloat($('scrubber').value);
   const crop = info.crop;
+  const requestId = ++previewRequestId;
+
+  const isCurrentRequest = () =>
+    requestId === previewRequestId &&
+    currentPreview === info &&
+    info.crop === crop &&
+    parseFloat($('scrubber').value) === timestamp;
 
   // Show loading state
   $('no-orig').textContent = 'Loading…';
@@ -316,22 +339,27 @@ async function triggerFrameUpdate() {
       window.go.main.App.GetFrame(info.path, timestamp, crop),
     ]);
 
+    if (!isCurrentRequest()) return;
+
     origFrameData = origB64;
 
     if (origB64) {
       $('no-orig').style.display = 'none';
-      await drawOrigWithOverlay($('canvas-orig'), origB64, crop, info);
+      await drawOrigWithOverlay($('canvas-orig'), origB64, crop, info, isCurrentRequest);
     } else {
       $('no-orig').textContent = 'Failed to extract frame';
     }
 
+    if (!isCurrentRequest()) return;
+
     if (cropB64) {
       $('no-crop').style.display = 'none';
-      await drawSimpleFrame($('canvas-crop'), cropB64, $('crop-size'));
+      await drawSimpleFrame($('canvas-crop'), cropB64, $('crop-size'), isCurrentRequest);
     } else {
       $('no-crop').textContent = 'Failed to extract frame';
     }
   } catch (e) {
+    if (!isCurrentRequest()) return;
     $('no-orig').textContent = 'Error';
     $('no-crop').textContent = 'Error';
     console.error('GetFrame error:', e);
@@ -347,8 +375,10 @@ function loadImage(base64) {
   });
 }
 
-async function drawOrigWithOverlay(canvas, base64, cropStr, info) {
+async function drawOrigWithOverlay(canvas, base64, cropStr, info, shouldContinue = null) {
   const img = await loadImage(base64);
+  if (shouldContinue && !shouldContinue()) return;
+
   const natW = img.naturalWidth;
   const natH = img.naturalHeight;
   const { w: cw, h: ch, x: cx, y: cy } = parseCrop(cropStr);
@@ -378,8 +408,10 @@ async function drawOrigWithOverlay(canvas, base64, cropStr, info) {
   $('orig-size').textContent = `${natW}×${natH}`;
 }
 
-async function drawSimpleFrame(canvas, base64, sizeEl) {
+async function drawSimpleFrame(canvas, base64, sizeEl, shouldContinue = null) {
   const img = await loadImage(base64);
+  if (shouldContinue && !shouldContinue()) return;
+
   const natW = img.naturalWidth;
   const natH = img.naturalHeight;
 
@@ -714,35 +746,6 @@ function onEncodeCancelled() {
 }
 
 // ---------------------------------------------------------------------------
-// Split-pane drag
-// ---------------------------------------------------------------------------
-
-function initSplitter() {
-  const handle    = $('split-handle');
-  const tableBox  = $('table-section');
-  const splitBox  = $('main-split');
-  let dragging = false, startY = 0, startH = 0;
-
-  handle.addEventListener('mousedown', e => {
-    dragging = true;
-    startY   = e.clientY;
-    startH   = tableBox.getBoundingClientRect().height;
-    document.body.style.cursor = 'ns-resize';
-    e.preventDefault();
-  });
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const splitH = splitBox.getBoundingClientRect().height;
-    const newH   = Math.min(splitH - 120, Math.max(60, startH + (e.clientY - startY)));
-    tableBox.style.height = newH + 'px';
-  });
-  document.addEventListener('mouseup', () => {
-    dragging = false;
-    document.body.style.cursor = '';
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -819,7 +822,6 @@ async function init() {
   window.runtime.EventsOn('encode:complete',  onEncodeComplete);
   window.runtime.EventsOn('encode:cancelled', onEncodeCancelled);
 
-  initSplitter();
   setButtonState();
 }
 

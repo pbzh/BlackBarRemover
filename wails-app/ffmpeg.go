@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +57,30 @@ var supportedExtensions = map[string]bool{
 
 var cropPattern = regexp.MustCompile(`crop=(\d+:\d+:\d+:\d+)`)
 var progressTimePat = regexp.MustCompile(`out_time_ms=(\d+)`)
+
+type tailWriter struct {
+	buf []byte
+	max int
+}
+
+func newTailWriter(max int) *tailWriter {
+	return &tailWriter{max: max}
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	if w.max <= 0 {
+		return len(p), nil
+	}
+	w.buf = append(w.buf, p...)
+	if len(w.buf) > w.max {
+		w.buf = w.buf[len(w.buf)-w.max:]
+	}
+	return len(p), nil
+}
+
+func (w *tailWriter) String() string {
+	return strings.TrimSpace(string(w.buf))
+}
 
 // ---------------------------------------------------------------------------
 // Tool discovery
@@ -295,15 +318,16 @@ func buildEncodeArgs(srcPath, outPath, cropFilter, hwMode string, info *VideoInf
 	return args
 }
 
-func runEncode(ctx context.Context, ffmpegPath string, args []string, duration float64, onProgress func(float64)) bool {
+func runEncode(ctx context.Context, ffmpegPath string, args []string, duration float64, onProgress func(float64)) (bool, string) {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
-	cmd.Stderr = io.Discard
+	errTail := newTailWriter(8192)
+	cmd.Stderr = errTail
 	if err := cmd.Start(); err != nil {
-		return false
+		return false, err.Error()
 	}
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
@@ -318,7 +342,17 @@ func runEncode(ctx context.Context, ffmpegPath string, args []string, duration f
 			}
 		}
 	}
-	return cmd.Wait() == nil
+	if err := scanner.Err(); err != nil {
+		return false, err.Error()
+	}
+	if err := cmd.Wait(); err != nil {
+		errText := errTail.String()
+		if errText == "" {
+			errText = err.Error()
+		}
+		return false, errText
+	}
+	return true, ""
 }
 
 // ---------------------------------------------------------------------------
