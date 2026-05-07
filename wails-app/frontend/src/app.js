@@ -7,6 +7,8 @@
 const HW_MODES_ALL = [
   { label: 'QSV – HW Encode',                key: 'qsv',        platforms: ['windows', 'linux'] },
   { label: 'QSV – Full HW Pipeline',         key: 'qsv_fullhw', platforms: ['windows', 'linux'] },
+  { label: 'AMF (AMD) – HW Encode',           key: 'amf',        platforms: ['windows', 'linux'] },
+  { label: 'AMF (AMD) – Full HW Pipeline',    key: 'amf_fullhw', platforms: ['windows', 'linux'] },
   { label: 'VideoToolbox – HW Encode',        key: 'vt',         platforms: ['darwin'] },
   { label: 'VideoToolbox – Full HW Pipeline', key: 'vt_fullhw',  platforms: ['darwin'] },
   { label: 'CPU – Software',                  key: 'cpu',        platforms: null },
@@ -775,6 +777,7 @@ async function init() {
   if (status.found) {
     const hw = [];
     if (status.qsv_avail)  hw.push('QSV');
+    if (status.amf_avail)  hw.push('AMF');
     if (status.vt_avail)   hw.push('VideoToolbox');
     addLog(hw.length
       ? `✔  ffmpeg found: ${status.path}  |  ${hw.join(', ')} available`

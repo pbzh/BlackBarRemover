@@ -50,6 +50,7 @@ type FFmpegStatus struct {
 	Path     string `json:"path"`
 	QSVAvail bool   `json:"qsv_avail"`
 	VTAvail  bool   `json:"vt_avail"`
+	AMFAvail bool   `json:"amf_avail"`
 	Platform string `json:"platform"`
 }
 
@@ -102,6 +103,10 @@ func (a *App) CheckFFmpeg() FFmpegStatus {
 		lower := strings.ToLower(string(out))
 		status.QSVAvail = strings.Contains(lower, "qsv")
 		status.VTAvail = strings.Contains(lower, "videotoolbox")
+	}
+	// AMF is encoder-only — not listed in -hwaccels. Probe -encoders.
+	if out, err := exec.Command(a.ffmpeg, "-hide_banner", "-encoders").Output(); err == nil {
+		status.AMFAvail = strings.Contains(strings.ToLower(string(out)), "_amf")
 	}
 	return status
 }

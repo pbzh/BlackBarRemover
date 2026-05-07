@@ -29,6 +29,7 @@ export namespace main {
 	    path: string;
 	    qsv_avail: boolean;
 	    vt_avail: boolean;
+	    amf_avail: boolean;
 	    platform: string;
 	
 	    static createFrom(source: any = {}) {
@@ -41,6 +42,7 @@ export namespace main {
 	        this.path = source["path"];
 	        this.qsv_avail = source["qsv_avail"];
 	        this.vt_avail = source["vt_avail"];
+	        this.amf_avail = source["amf_avail"];
 	        this.platform = source["platform"];
 	    }
 	}

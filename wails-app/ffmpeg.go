@@ -50,6 +50,25 @@ var vtEncoders = map[string]string{
 	"prores": "prores_videotoolbox",
 }
 
+var amfEncoders = map[string]string{
+	"h264": "h264_amf",
+	"hevc": "hevc_amf",
+	"h265": "hevc_amf",
+	"av1":  "av1_amf",
+}
+
+// amfQualityFromPreset maps libx264-style preset names to AMF -quality values.
+func amfQualityFromPreset(preset string) string {
+	switch preset {
+	case "veryfast", "faster", "fast":
+		return "speed"
+	case "slow", "slower", "veryslow":
+		return "quality"
+	default:
+		return "balanced"
+	}
+}
+
 var supportedExtensions = map[string]bool{
 	".mp4": true, ".mkv": true, ".avi": true, ".mov": true,
 	".ts": true, ".flv": true, ".wmv": true, ".webm": true, ".m4v": true,
@@ -274,6 +293,38 @@ func buildEncodeArgs(srcPath, outPath, cropFilter, hwMode string, info *VideoInf
 			if dec := qsvDecoders[codec]; dec != "" {
 				preInput = []string{"-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", dec}
 				vf = fmt.Sprintf("hwdownload,format=nv12,%s,hwupload=extra_hw_frames=64", cropFilter)
+			}
+		}
+
+	case "amf", "amf_fullhw":
+		if codec == "h264" && info.Is10Bit {
+			encoder = "libx264"
+			encArgs = []string{"-crf", strconv.Itoa(quality), "-preset", preset}
+		} else {
+			enc := amfEncoders[codec]
+			if enc == "" {
+				enc = "h264_amf"
+			}
+			encoder = enc
+			amfQ := amfQualityFromPreset(preset)
+			encArgs = []string{
+				"-rc", "cqp",
+				"-qp_i", strconv.Itoa(quality),
+				"-qp_p", strconv.Itoa(quality),
+				"-quality", amfQ,
+			}
+			if enc != "av1_amf" {
+				encArgs = append(encArgs, "-qp_b", strconv.Itoa(quality))
+			}
+		}
+		if hwMode == "amf_fullhw" {
+			switch runtime.GOOS {
+			case "windows":
+				preInput = []string{"-hwaccel", "d3d11va", "-hwaccel_output_format", "d3d11"}
+				vf = fmt.Sprintf("hwdownload,format=nv12,%s", cropFilter)
+			case "linux":
+				preInput = []string{"-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"}
+				vf = fmt.Sprintf("hwdownload,format=nv12,%s", cropFilter)
 			}
 		}
 
