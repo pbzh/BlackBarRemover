@@ -1,0 +1,71 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background: deep navy vertical gradient -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2942"/>
+      <stop offset="0.55" stop-color="#111a2e"/>
+      <stop offset="1" stop-color="#0a1120"/>
+    </linearGradient>
+
+    <!-- Subtle radial glow behind the player -->
+    <radialGradient id="glow" cx="0.5" cy="0.44" r="0.55">
+      <stop offset="0" stop-color="#3b6ea5" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#3b6ea5" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Player border: cyan → blue gradient -->
+    <linearGradient id="stroke" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7fe3ff"/>
+      <stop offset="0.5" stop-color="#4aa8f0"/>
+      <stop offset="1" stop-color="#3f7fe0"/>
+    </linearGradient>
+
+    <!-- Inner screen fill -->
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#243a5c"/>
+      <stop offset="1" stop-color="#16233b"/>
+    </linearGradient>
+
+    <!-- Play triangle fill -->
+    <linearGradient id="play" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eaf6ff"/>
+      <stop offset="1" stop-color="#bfe3ff"/>
+    </linearGradient>
+
+    <!-- Rounded-square clip (iOS superellipse-ish) -->
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#glow)"/>
+
+    <!-- Viewfinder corner brackets -->
+    <g fill="none" stroke="#f2f6fb" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" opacity="0.95">
+      <!-- top-left -->
+      <path d="M 250 320 L 250 260 Q 250 250 260 250 L 320 250"/>
+      <!-- top-right -->
+      <path d="M 704 250 L 764 250 Q 774 250 774 260 L 774 320"/>
+      <!-- bottom-left -->
+      <path d="M 250 704 L 250 764 Q 250 774 260 774 L 320 774"/>
+      <!-- bottom-right -->
+      <path d="M 704 774 L 764 774 Q 774 774 774 764 L 774 704"/>
+    </g>
+
+    <!-- Video player screen -->
+    <g>
+      <rect x="312" y="374" width="400" height="248" rx="34" ry="34" fill="url(#screen)"/>
+      <rect x="312" y="374" width="400" height="248" rx="34" ry="34" fill="none" stroke="url(#stroke)" stroke-width="16"/>
+      <!-- Play triangle -->
+      <path d="M 470 435 L 470 561 L 578 498 Z" fill="url(#play)"/>
+    </g>
+
+    <!-- Timer readout -->
+    <text x="512" y="712" text-anchor="middle"
+          font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif"
+          font-size="70" font-weight="700" letter-spacing="3"
+          fill="#f2f6fb">00:15</text>
+  </g>
+</svg>
