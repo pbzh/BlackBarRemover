@@ -8,7 +8,7 @@ BlackBarRemover is a video processing tool that removes black bars (letterboxing
 
 The **Python/PyQt6 desktop app** (`blackbar_remove.py`) is the single, primary implementation. It is a personal tool run directly from source, so easy iteration matters more than packaged distribution.
 
-> **Deprecated:** `wails-app/` was an earlier cross-platform rewrite in Go (Wails v2 + vanilla JS). The project has consolidated back onto the Python app; the Wails app is no longer developed and is slated for removal. Do not add features to it.
+> **History:** An earlier `wails-app/` cross-platform rewrite in Go (Wails v2 + vanilla JS) was removed when the project consolidated back onto the Python app. It remains recoverable from git history if ever needed.
 
 ## Commands
 
