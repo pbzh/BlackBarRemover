@@ -35,8 +35,3 @@ desktop.ini
 # Temp / output files (don't accidentally commit encoded videos)
 *_nocrop.*
 *_tmp.*
-
-# Wails app build assets are tracked (override the generic build/ rule above),
-# but generated binaries are not.
-!wails-app/build/
-wails-app/build/bin/
