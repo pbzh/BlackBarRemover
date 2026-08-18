@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-BlackBarRemover is a video processing tool that removes black bars (letterboxing/pillarboxing) from videos using FFmpeg's `cropdetect` filter. There are **two parallel implementations**:
-- `blackbar_remove.py` — original Python/PyQt6 desktop app
-- `wails-app/` — cross-platform rewrite in Go with a browser-based frontend (Wails v2 + vanilla JS)
+BlackBarRemover is a video processing tool that removes black bars (letterboxing/pillarboxing) from videos using FFmpeg's `cropdetect` filter.
 
-Active development is on the Wails app; the Python app is feature-complete but not the primary focus.
+The **Python/PyQt6 desktop app** (`blackbar_remove.py`) is the single, primary implementation. It is a personal tool run directly from source, so easy iteration matters more than packaged distribution.
+
+> **Deprecated:** `wails-app/` was an earlier cross-platform rewrite in Go (Wails v2 + vanilla JS). The project has consolidated back onto the Python app; the Wails app is no longer developed and is slated for removal. Do not add features to it.
 
 ## Commands
 
@@ -18,52 +18,28 @@ pip install PyQt6
 python blackbar_remove.py
 ```
 
-### Wails App
-```bash
-cd wails-app
-
-# Install Wails CLI (first time only)
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-
-# Development with hot reload
-wails dev
-
-# Production build → build/bin/BlackBarRemove.app (macOS) or .exe (Windows)
-wails build
-```
-
-**Requirements:** Go 1.22+, Node.js/npm (auto-managed by Wails), FFmpeg installed on system.
+**Requirements:** Python 3.10+ (uses `X | Y` type unions), PyQt6, and FFmpeg installed on the system (with the `h264_amf` encoder for AMD hardware acceleration — e.g. a BtbN FFmpeg build on Windows).
 
 ## Architecture
 
-### Data Flow (both apps)
+### Data Flow
 1. **File loading** → extract metadata via `ffprobe` (resolution, codec, duration)
 2. **Crop detection** → run `ffmpeg -vf "fps=1/N,cropdetect=24:16:0"`, collect all reported crop regions, pick the most frequent one
 3. **Preview** → extract PNG frames at given timestamps with optional crop filter applied, show side-by-side comparison
 4. **Encoding** → construct FFmpeg args based on codec + hardware mode, run with progress piped back to UI
 
-### Wails App Structure
-
-**Backend (Go):**
-- `app.go` — `App` struct with exported methods callable from JS: `LoadFiles()`, `StartDetection()`, `StartProcessing()`, `GetFrame()`, `CalcCropForAspect()`, `CancelOperation()`, `CheckFFmpeg()`
-- `ffmpeg.go` — all FFmpeg logic: tool discovery, video info extraction, frame extraction, cropdetect, encode arg construction, encoding runner
-- `main.go` — Wails entry point only
-
-**Frontend (vanilla JS):**
-- `frontend/src/app.js` — all UI logic (state, event handling, table management, preview rendering, crop overlay canvas)
-- `frontend/wailsjs/` — auto-generated JS/TS bindings; **do not edit manually**
-
-**Frontend ↔ Backend communication:**
-- Method calls: `await window.go.main.App.MethodName(args)` → returns `Promise<T>`
-- Events from Go to JS: `wailsrt.EventsEmit(ctx, "event:name", data)` → `window.runtime.EventsOn("event:name", callback)`
-- Key events: `detect:start`, `detect:result`, `detect:complete`, `encode:progress`, `encode:done`, `log`
-
 ### Hardware Acceleration
 
-Three encoding paths selected at runtime:
-- **QSV (Intel Quick Sync):** `h264_qsv`/`hevc_qsv`/`av1_qsv` encoders; uses `global_quality` for rate control
-- **VideoToolbox (macOS/Apple Silicon):** `h264_videotoolbox`/`hevc_videotoolbox`; quality mapped from CRF scale (1–51) to `q:v` (0.0–1.0)
-- **CPU fallback:** `libx264`/`libx265`/`libvpx-vp9`; uses standard `crf`
+Encoding paths selected at runtime via the "HW Mode" dropdown (`_HW_MODES_ALL` filters
+options by platform). Each maps to an encoder map + rate-control convention in
+`EncodeWorker.__init__`:
+- **QSV (Intel Quick Sync)** — `qsv` / `qsv_fullhw`: `h264_qsv`/`hevc_qsv`/`av1_qsv`; `-global_quality` rate control; the full-HW pipeline decodes on QSV surfaces, downloads for the CPU crop filter, then re-uploads for encode.
+- **AMF (AMD Radeon)** — `amf` / `amf_fullhw`: `h264_amf`/`hevc_amf`/`av1_amf` (`AMF_ENCODERS`); constant-QP rate control (`-rc cqp` with `-qp_i/-qp_p/-qp_b`) mapped from the 1–51 quality scale, rescaled to 0–255 for `av1_amf`; the libx264-style preset is translated to AMF's `-quality speed/balanced/quality` via `amf_quality_from_preset()`. AMF is encode-only in FFmpeg, so `amf_fullhw` pairs it with a Windows `d3d11va` hardware decode (guarded by `D3D11VA_DECODABLE`), crops on CPU frames, and hands them straight to the encoder (no hwupload). `av1_amf` requires RDNA3+.
+- **VideoToolbox (macOS/Apple Silicon)** — `vt` / `vt_fullhw`: `h264_videotoolbox`/`hevc_videotoolbox`; quality mapped from CRF scale (1–51) to `q:v` (0.0–1.0).
+- **CPU fallback** — `cpu`: `libx264`/`libx265`/`libvpx-vp9`; standard `-crf`.
+
+`check_hw_available()` probes `ffmpeg -hwaccels` for QSV/VideoToolbox and `ffmpeg -encoders`
+for `h264_amf` (AMF encoders are not reported by `-hwaccels`).
 
 Audio and subtitles are always stream-copied (no re-encoding).
 

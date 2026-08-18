@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QProcess, QRect, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -44,6 +44,9 @@ from PyQt6.QtWidgets import (
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Application icon, shipped alongside the script in assets/.
+APP_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "appicon.png")
 
 SUPPORTED_EXTENSIONS = {
     ".mp4",
@@ -95,6 +98,29 @@ VT_ENCODERS: dict[str, str] = {
     "prores": "prores_videotoolbox",
 }
 
+# AMD AMF hardware encoder map (Radeon on Windows; also Linux w/ amdgpu-pro AMF).
+# av1_amf requires RDNA3 or newer (e.g. RX 7000 / RX 9000 series).
+AMF_ENCODERS: dict[str, str] = {
+    "h264": "h264_amf",
+    "hevc": "hevc_amf",
+    "h265": "hevc_amf",
+    "av1": "av1_amf",
+}
+
+# Codecs the Windows d3d11va decoder can reliably offload for the AMF full-HW
+# pipeline on modern AMD GPUs.  Kept conservative on purpose: RDNA4 (e.g. the
+# RX 9070 series) dropped fixed-function decode for legacy codecs like MPEG-2,
+# VC-1 and VP8, and forcing -hwaccel d3d11va on an unsupported codec makes
+# FFmpeg error out rather than fall back.  Anything not listed here uses
+# software decode + AMF hardware encode instead.
+D3D11VA_DECODABLE: set[str] = {
+    "h264",
+    "hevc",
+    "h265",
+    "vp9",
+    "av1",
+}
+
 # Maximum concurrent cropdetect workers when processing a batch
 MAX_DETECT_WORKERS = 4
 
@@ -107,6 +133,8 @@ QSV_PRESET_DEFAULT = "medium"
 _HW_MODES_ALL = [
     ("QSV – HW Encode",                "qsv",        ("win32", "linux")),
     ("QSV – Full HW Pipeline",         "qsv_fullhw", ("win32", "linux")),
+    ("AMF – HW Encode (AMD)",          "amf",        ("win32", "linux")),
+    ("AMF – Full HW Pipeline (AMD)",   "amf_fullhw", ("win32",)),
     ("VideoToolbox – HW Encode",        "vt",         ("darwin",)),
     ("VideoToolbox – Full HW Pipeline", "vt_fullhw",  ("darwin",)),
     ("CPU – Software",                  "cpu",        None),
@@ -186,6 +214,7 @@ def find_ffmpeg_tool(name: str) -> str:
 
 def check_hw_available() -> set[str]:
     """Return the set of hardware accelerators available in this FFmpeg build."""
+    found: set[str] = set()
     try:
         result = subprocess.run(
             [FFMPEG, "-hide_banner", "-hwaccels"],
@@ -194,9 +223,25 @@ def check_hw_available() -> set[str]:
             timeout=10,
         )
         out = result.stdout.lower()
-        return {name for name in ("qsv", "videotoolbox") if name in out}
+        found |= {name for name in ("qsv", "videotoolbox") if name in out}
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return set()
+        return found
+
+    # AMD AMF encoders are not listed by -hwaccels (that lists decode
+    # accelerators), so probe the encoder list for h264_amf instead.
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if "h264_amf" in result.stdout.lower():
+            found.add("amf")
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    return found
 
 
 FFMPEG = find_ffmpeg_tool("ffmpeg")
@@ -239,6 +284,31 @@ def crop_to_vf_vt_fullhw(crop_filter: str, is_10bit: bool = False) -> str:
     """
     fmt = "p010le" if is_10bit else "nv12"
     return f"hwdownload,format={fmt},{crop_filter}"
+
+
+def crop_to_vf_amf_fullhw(crop_filter: str, is_10bit: bool = False) -> str:
+    """Convert 'crop=W:H:X:Y' to a filter chain for the AMD AMF full HW pipeline.
+
+    FFmpeg's AMF encoders operate on system-memory frames, so after a d3d11va
+    hardware decode (-hwaccel_output_format d3d11) we download the GPU surfaces
+    to system memory, run the CPU crop filter, and hand the cropped frames
+    straight to the AMF encoder (no hwupload needed).
+    """
+    fmt = "p010le" if is_10bit else "nv12"
+    return f"hwdownload,format={fmt},{crop_filter}"
+
+
+def amf_quality_from_preset(preset: str) -> str:
+    """Map a libx264-style preset name to an AMF -quality value.
+
+    AMF exposes speed/balanced/quality rather than the veryfast…veryslow scale,
+    so the shared preset dropdown is translated onto that three-point axis.
+    """
+    if preset in ("veryfast", "faster", "fast"):
+        return "speed"
+    if preset in ("slow", "slower", "veryslow"):
+        return "quality"
+    return "balanced"
 
 
 def get_video_info(filepath: str) -> dict | None:
@@ -414,9 +484,11 @@ class CropDetectWorker:
 class EncodeWorker:
     """Runs ffmpeg encoding asynchronously via QProcess.
 
-    Supports five hardware modes:
+    Supports these hardware modes:
       qsv         – software decode, QSV hardware encode  (Windows/Linux)
       qsv_fullhw  – QSV hardware decode + crop + QSV encode  (fastest on Intel)
+      amf         – software decode, AMD AMF hardware encode  (Windows/Linux)
+      amf_fullhw  – d3d11va hardware decode + crop + AMF encode  (Windows, AMD)
       vt          – software decode, VideoToolbox hardware encode  (macOS)
       vt_fullhw   – VideoToolbox decode + crop + VT encode  (fastest on macOS)
       cpu         – fully software encode via libx264 / libx265
@@ -484,6 +556,44 @@ class EncodeWorker:
                 else:
                     # No QSV decoder for this codec – still use QSV encode
                     vf_filter = crop_filter
+
+        elif hw_mode in ("amf", "amf_fullhw"):
+            encoder = AMF_ENCODERS.get(video_codec, "h264_amf")
+            # AMF uses constant-QP rate control (-rc cqp) as the closest
+            # analogue to CRF.  The 1–51 quality scale maps directly onto the
+            # H.264/HEVC QP range; AV1 AMF uses a wider 0–255 QP range, so
+            # rescale for that encoder.
+            if encoder == "av1_amf":
+                qp = max(0, min(255, round(quality / 51 * 255)))
+            else:
+                qp = max(0, min(51, quality))
+            enc_args = [
+                "-rc",
+                "cqp",
+                "-qp_i",
+                str(qp),
+                "-qp_p",
+                str(qp),
+                "-quality",
+                amf_quality_from_preset(preset),
+            ]
+            # -qp_b applies to H.264/HEVC (B-frames); av1_amf rejects it.
+            if encoder != "av1_amf":
+                enc_args += ["-qp_b", str(qp)]
+
+            if hw_mode == "amf_fullhw" and video_codec in D3D11VA_DECODABLE:
+                # AMF has no decoder of its own; pair it with the Windows
+                # d3d11va decoder, crop on CPU frames, then AMF encodes them.
+                pre_input_args = [
+                    "-hwaccel",
+                    "d3d11va",
+                    "-hwaccel_output_format",
+                    "d3d11",
+                ]
+                vf_filter = crop_to_vf_amf_fullhw(crop_filter, is_10bit)
+            else:
+                # Software decode + AMF hardware encode.
+                vf_filter = crop_filter
 
         elif hw_mode in ("vt", "vt_fullhw"):
             encoder = VT_ENCODERS.get(video_codec, "h264_videotoolbox")
@@ -1324,6 +1434,8 @@ class BlackBarRemoveApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BlackBar Remove")
+        if os.path.exists(APP_ICON_PATH):
+            self.setWindowIcon(QIcon(APP_ICON_PATH))
         self.setMinimumSize(1060, 780)
 
         self.files: list[dict] = []
@@ -1362,6 +1474,8 @@ class BlackBarRemoveApp(QMainWindow):
         hw_available = []
         if sys.platform in ("win32", "linux") and "qsv" in hw_found:
             hw_available.append("QSV")
+        if sys.platform in ("win32", "linux") and "amf" in hw_found:
+            hw_available.append("AMF (AMD)")
         if sys.platform == "darwin" and "videotoolbox" in hw_found:
             hw_available.append("VideoToolbox")
 
@@ -1370,8 +1484,8 @@ class BlackBarRemoveApp(QMainWindow):
         else:
             if sys.platform in ("win32", "linux"):
                 self._log(
-                    "⚠  QSV does not appear to be available in this ffmpeg build.  "
-                    "Install an ffmpeg build with --enable-libmfx / --enable-qsv "
+                    "⚠  No Intel QSV or AMD AMF encoder found in this ffmpeg build.  "
+                    "Install an ffmpeg build with --enable-libmfx / --enable-amf "
                     "(e.g. from https://github.com/BtbN/FFmpeg-Builds).  "
                     "CPU mode will still work."
                 )
@@ -1429,6 +1543,8 @@ class BlackBarRemoveApp(QMainWindow):
         self.cb_hw.setToolTip(
             "QSV – HW Encode:         Software decode, Intel QSV hardware encode\n"
             "QSV – Full HW Pipeline:  Intel QSV decode + crop + encode  (fastest on Intel)\n"
+            "AMF – HW Encode (AMD):        Software decode, AMD Radeon AMF hardware encode\n"
+            "AMF – Full HW Pipeline (AMD): d3d11va decode + crop + AMF encode  (Windows, AMD)\n"
             "VideoToolbox – HW Encode:         Software decode, Apple VT hardware encode\n"
             "VideoToolbox – Full HW Pipeline:  Apple VT decode + crop + encode  (fastest on macOS)\n"
             "CPU – Software:          Fully software encode via libx264 / libx265"
@@ -1445,6 +1561,7 @@ class BlackBarRemoveApp(QMainWindow):
         self.sp_quality.setValue(QSV_QUALITY_DEFAULT)
         self.sp_quality.setToolTip(
             "QSV: global_quality  (1 = best quality / largest file,  51 = worst / smallest)\n"
+            "AMF: constant QP  (-rc cqp; same 1–51 scale, rescaled for AV1)\n"
             "VideoToolbox: quality mapped to 1.0–0.0 range\n"
             "CPU: CRF value  (same scale applies for libx264/libx265)"
         )
@@ -1459,7 +1576,8 @@ class BlackBarRemoveApp(QMainWindow):
         self.cb_preset.addItems(QSV_PRESETS)
         self.cb_preset.setCurrentText(QSV_PRESET_DEFAULT)
         self.cb_preset.setToolTip(
-            "Encoding speed preset.  Slower = better compression."
+            "Encoding speed preset.  Slower = better compression.\n"
+            "AMF (AMD) maps fast→speed, medium→balanced, slow→quality."
         )
         settings_layout.addWidget(self.cb_preset)
 
@@ -1963,6 +2081,8 @@ class BlackBarRemoveApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    if os.path.exists(APP_ICON_PATH):
+        app.setWindowIcon(QIcon(APP_ICON_PATH))
     window = BlackBarRemoveApp()
     window.show()
     sys.exit(app.exec())
