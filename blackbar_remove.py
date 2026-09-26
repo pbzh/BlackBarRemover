@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from pathlib import Path
@@ -304,8 +304,17 @@ def get_video_info(filepath: str) -> dict | None:
         data = json.loads(result.stdout)
         info: dict = {"path": filepath}
 
+        video_n = 0  # index among video streams, for -c:v:N / -filter:v:N
         for stream in data.get("streams", []):
-            if stream["codec_type"] == "video" and "video_codec" not in info:
+            if stream["codec_type"] == "video":
+                # Cover art is exposed as a video stream with attached_pic set;
+                # it is not the movie, so skip it when choosing the stream to crop.
+                is_cover = stream.get("disposition", {}).get("attached_pic") == 1
+                if "video_codec" in info or is_cover:
+                    video_n += 1
+                    continue
+                info["video_index"] = video_n
+                video_n += 1
                 codec = stream["codec_name"].lower()
                 info["video_codec"] = codec
                 info["width"] = int(stream["width"])
@@ -482,6 +491,8 @@ class EncodeWorker:
         self.duration = video_info.get("duration", 0)
         self.on_progress = on_progress
         self.on_done = on_done
+        self._partial = ""                     # incomplete trailing line from last read
+        self._log_tail: deque[str] = deque(maxlen=20)  # recent non-progress output
         self.process = QProcess()
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read)
@@ -555,21 +566,30 @@ class EncodeWorker:
             encoder = SW_ENCODERS.get(video_codec, "libx264")
             enc_args = ["-crf", str(quality), "-preset", preset]
 
+        # Keep every stream (-map 0) but only crop/re-encode the main video
+        # stream.  Everything else — audio, subtitles, cover art, data and
+        # attachments — is stream-copied.  A plain -vf would apply the crop
+        # to every video stream and fail on e.g. a 600×600 cover image.
+        v = video_info.get("video_index", 0)
         self.args = [
+            "-hide_banner",
+            "-nostats",
+            # Only warnings/errors reach stderr, so the captured tail shown on
+            # failure is the actual cause rather than stream metadata.
+            "-loglevel",
+            "warning",
             *pre_input_args,
             "-i",
             filepath,
-            "-vf",
-            vf_filter,
-            "-c:v",
-            encoder,
-            *enc_args,
-            "-c:a",
-            "copy",
-            "-c:s",
-            "copy",
             "-map",
             "0",
+            "-c",
+            "copy",
+            f"-c:v:{v}",
+            encoder,
+            f"-filter:v:{v}",
+            vf_filter,
+            *enc_args,
             "-progress",
             "pipe:1",
             "-y",
@@ -579,24 +599,43 @@ class EncodeWorker:
     def start(self):
         self.process.start(FFMPEG, self.args)
 
+    # "-progress pipe:1" emits key=value lines; anything else is ffmpeg's
+    # stderr (merged channel), which is kept for error reporting.
+    _PROGRESS_LINE = re.compile(r"^[a-z0-9_]+=\S*$")
+
     def _read(self):
         data = (
             self.process.readAllStandardOutput()
             .data()
             .decode("utf-8", errors="replace")
         )
-        for line in data.splitlines():
-            if line.startswith("out_time_ms="):
-                try:
-                    us = int(line.split("=")[1])
-                    if self.duration > 0:
-                        pct = min(100.0, (us / 1_000_000) / self.duration * 100)
-                        self.on_progress(self.filepath, pct)
-                except ValueError:
-                    pass
+        lines = (self._partial + data).splitlines(keepends=True)
+        self._partial = lines.pop() if lines and not lines[-1].endswith(("\n", "\r")) else ""
+        for line in lines:
+            self._handle_line(line.strip())
+
+    def _handle_line(self, line: str):
+        if not line:
+            return
+        # out_time_ms is also in microseconds (a long-standing ffmpeg misnomer);
+        # older builds only emit that one.
+        if line.startswith(("out_time_us=", "out_time_ms=")):
+            try:
+                us = int(line.split("=")[1])
+                if self.duration > 0:
+                    pct = min(100.0, (us / 1_000_000) / self.duration * 100)
+                    self.on_progress(self.filepath, pct)
+            except ValueError:
+                pass
+        elif not self._PROGRESS_LINE.match(line) and not line.startswith("Multiple -c"):
+            # (the "Multiple -c" warning is expected: -c copy is overridden by
+            # -c:v:N for the stream we re-encode)
+            self._log_tail.append(line)
 
     def _finished(self):
-        self.on_done(self.filepath, self.process.exitCode() == 0)
+        self._handle_line(self._partial.strip())
+        self._partial = ""
+        self.on_done(self.filepath, self.process.exitCode() == 0, list(self._log_tail))
 
 
 # ---------------------------------------------------------------------------
@@ -1952,7 +1991,7 @@ class BlackBarRemoveApp(QMainWindow):
     def _on_encode_progress(self, _filepath: str, pct: float):
         self.progress.setValue(int(pct))
 
-    def _on_encode_done(self, filepath: str, success: bool):
+    def _on_encode_done(self, filepath: str, success: bool, ffmpeg_tail: list[str]):
         info = self.encode_queue[self._encode_index]
         row = info["_row"]
         p = Path(filepath)
@@ -1968,10 +2007,11 @@ class BlackBarRemoveApp(QMainWindow):
             self._log(f"  Finished: {p.name}")
         else:
             self.table.setItem(row, 5, QTableWidgetItem("Error ✖"))
+            self._log(f"  Error encoding: {p.name}  — ffmpeg output:")
+            for line in ffmpeg_tail or ["(no output captured)"]:
+                self._log(f"    {line}")
             self._log(
-                f"  Error encoding: {p.name}  "
-                "(check the log – HW encoder may not support this codec/format; "
-                "try switching to CPU mode)"
+                "  If this is a hardware-encoder error, try switching to CPU mode."
             )
             output = info.get("_output", "")
             if output and os.path.exists(output):

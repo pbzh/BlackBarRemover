@@ -40,7 +40,9 @@ options by platform). Each maps to an encoder map + rate-control convention in
 `check_hw_available()` probes `ffmpeg -hwaccels` for VideoToolbox and `ffmpeg -encoders`
 for `h264_amf` (AMF encoders are not reported by `-hwaccels`).
 
-Audio and subtitles are always stream-copied (no re-encoding).
+All streams are kept (`-map 0 -c copy`); only the main video stream is cropped and re-encoded via `-c:v:N` / `-filter:v:N`, where N is `video_info["video_index"]` — the first video stream that is not cover art (`disposition.attached_pic`). Never use a plain `-vf`: it would apply the crop to cover-art streams too and fail.
+
+On encode failure, `EncodeWorker` passes the last ~20 non-progress ffmpeg output lines (run with `-loglevel warning`) to `on_done`, and the app writes them to the log.
 
 ### Python App Structure (`blackbar_remove.py`)
 
