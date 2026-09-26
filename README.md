@@ -109,20 +109,36 @@ brew install ffmpeg
 
 ## Installation
 
-### Run the Wails app
+### Run from source
 
 ```bash
 git clone https://github.com/pbzh/BlackBarRemover.git
 cd BlackBarRemover
-cd wails-app
-wails dev
+pip install PyQt6
+python blackbar_remove.py
 ```
 
-### Build a desktop binary
+### macOS app (Apple Silicon)
+
+The **Build macOS app** GitHub Actions workflow (`.github/workflows/build-macos.yml`)
+builds `BlackBar Remover.app` with PyInstaller on an Apple Silicon runner. It runs on
+pushes that touch the app, the assets or the workflow, and can be started manually
+from the Actions tab. Download the `BlackBarRemover-macos-arm64` artifact from the run.
+
+The app is unsigned, so remove the quarantine flag after unzipping:
 
 ```bash
-cd wails-app
-wails build
+xattr -dr com.apple.quarantine "BlackBar Remover.app"
+```
+
+FFmpeg is not bundled; install it with `brew install ffmpeg`.
+
+To build locally on a Mac instead:
+
+```bash
+pip install PyQt6 pyinstaller pillow
+pyinstaller --noconfirm --windowed --name "BlackBar Remover" \
+  --icon assets/appicon.png --add-data "assets:assets" blackbar_remove.py
 ```
 
 ---
