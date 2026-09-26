@@ -24,7 +24,7 @@ python blackbar_remove.py
 
 ### Data Flow
 1. **File loading** → extract metadata via `ffprobe` (resolution, codec, duration)
-2. **Crop detection** → run `ffmpeg -vf "fps=1/N,cropdetect=24:16:0"`, collect all reported crop regions, pick the most frequent one
+2. **Crop detection** → run `ffmpeg -vf "fps=1/N,cropdetect=limit=0.0941:round=16:reset=0"` (limit is a fraction of max pixel value — `CROPDETECT_LIMIT` = 24/255 — so it works for 8- and 10-bit sources), collect all reported crop regions, pick the most frequent one
 3. **Preview** → extract PNG frames at given timestamps with optional crop filter applied, show side-by-side comparison
 4. **Encoding** → construct FFmpeg args based on codec + hardware mode, run with progress piped back to UI
 
@@ -34,7 +34,7 @@ Encoding paths selected at runtime via the "HW Mode" dropdown (`_HW_MODES_ALL` f
 options by platform). Each maps to an encoder map + rate-control convention in
 `EncodeWorker.__init__`:
 - **AMF (AMD Radeon)** — `amf` / `amf_fullhw`: `h264_amf`/`hevc_amf`/`av1_amf` (`AMF_ENCODERS`); constant-QP rate control (`-rc cqp` with `-qp_i/-qp_p/-qp_b`) mapped from the 1–51 quality scale, rescaled to 0–255 for `av1_amf`; the libx264-style preset is translated to AMF's `-quality speed/balanced/quality` via `amf_quality_from_preset()`. AMF is encode-only in FFmpeg, so `amf_fullhw` pairs it with a Windows `d3d11va` hardware decode (guarded by `D3D11VA_DECODABLE`), crops on CPU frames, and hands them straight to the encoder (no hwupload). `av1_amf` requires RDNA3+.
-- **VideoToolbox (macOS/Apple Silicon)** — `vt` / `vt_fullhw`: `h264_videotoolbox`/`hevc_videotoolbox`; quality mapped from CRF scale (1–51) to `q:v` (0.0–1.0).
+- **VideoToolbox (macOS/Apple Silicon)** — `vt` / `vt_fullhw`: `h264_videotoolbox`/`hevc_videotoolbox`; quality mapped from CRF scale (1–51) to `q:v` 100–1 (FFmpeg divides by 100 internally). Constant-quality `q:v` works on Apple Silicon only, which is the only supported Mac target.
 - **CPU fallback** — `cpu`: `libx264`/`libx265`/`libvpx-vp9`; standard `-crf`.
 
 `check_hw_available()` probes `ffmpeg -hwaccels` for VideoToolbox and `ffmpeg -encoders`

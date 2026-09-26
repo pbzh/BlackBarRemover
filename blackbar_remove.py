@@ -102,6 +102,11 @@ D3D11VA_DECODABLE: set[str] = {
     "av1",
 }
 
+# cropdetect black threshold as a fraction of the maximum pixel value (24/255).
+# A fraction scales with bit depth; an absolute value like 24 would sit below
+# limited-range black in 10-bit video (64) and detect no bars at all.
+CROPDETECT_LIMIT = 24 / 255
+
 # Maximum concurrent cropdetect workers when processing a batch
 MAX_DETECT_WORKERS = 4
 
@@ -424,7 +429,8 @@ class CropDetectWorker:
                 "-i",
                 self.filepath,
                 "-vf",
-                f"fps=1/{self.sample_interval},cropdetect=24:16:0",
+                f"fps=1/{self.sample_interval},"
+                f"cropdetect=limit={CROPDETECT_LIMIT:.4f}:round=16:reset=0",
                 "-f",
                 "null",
                 "-",
@@ -529,9 +535,12 @@ class EncodeWorker:
 
         elif hw_mode in ("vt", "vt_fullhw"):
             encoder = VT_ENCODERS.get(video_codec, "h264_videotoolbox")
-            # Map quality 1–51 (lower=better) to VT q:v 1.0–0.0 (higher=better)
-            vt_q = max(0.01, 1.0 - (quality - 1) / 50.0)
-            enc_args = ["-q:v", f"{vt_q:.2f}", "-allow_sw", "1"]
+            # Map quality 1–51 (lower=better) to VT q:v 100–1 (higher=better).
+            # FFmpeg divides q:v by 100 before handing it to VideoToolbox, so
+            # the scale is 1–100, not 0.0–1.0.  Constant-quality mode is only
+            # available on Apple Silicon.
+            vt_q = round(100 - (quality - 1) * 99 / 50)
+            enc_args = ["-q:v", str(vt_q), "-allow_sw", "1"]
 
             if hw_mode == "vt_fullhw":
                 pre_input_args = [
@@ -1688,6 +1697,11 @@ class BlackBarRemoveApp(QMainWindow):
             return
 
         str_paths = [str(fp) for fp in paths]
+        if not str_paths:
+            self._log(f"No supported video files found in: {path}")
+            self.btn_process.setEnabled(False)
+            self.btn_preview.setEnabled(False)
+            return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             with ThreadPoolExecutor(max_workers=min(8, len(str_paths))) as pool:
