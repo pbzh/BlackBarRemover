@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """BlackBar Remove - Detect and remove black bars from videos.
-Supports Intel QSV and Apple VideoToolbox hardware acceleration.
+Supports AMD AMF and Apple VideoToolbox hardware acceleration.
 """
 
 import json
@@ -63,25 +63,6 @@ SUPPORTED_FORMATS = (
     "Video Files (*.mp4 *.mkv *.avi *.mov *.ts *.flv *.wmv *.webm *.m4v);;All Files (*)"
 )
 
-# QSV hardware decoder map: codec name -> qsv decoder
-QSV_DECODERS: dict[str, str] = {
-    "h264": "h264_qsv",
-    "hevc": "hevc_qsv",
-    "h265": "hevc_qsv",
-    "vp9": "vp9_qsv",
-    "av1": "av1_qsv",
-    "mpeg2video": "mpeg2_qsv",
-    "vc1": "vc1_qsv",
-}
-
-# QSV hardware encoder map: codec name -> qsv encoder
-QSV_ENCODERS: dict[str, str] = {
-    "h264": "h264_qsv",
-    "hevc": "hevc_qsv",
-    "h265": "hevc_qsv",
-    "av1": "av1_qsv",
-}
-
 # Software fallback encoder map
 SW_ENCODERS: dict[str, str] = {
     "h264": "libx264",
@@ -124,15 +105,13 @@ D3D11VA_DECODABLE: set[str] = {
 # Maximum concurrent cropdetect workers when processing a batch
 MAX_DETECT_WORKERS = 4
 
-# QSV quality range: 1 (best quality) – 51 (smallest file).  23 is a balanced default.
-QSV_QUALITY_DEFAULT = 23
-QSV_PRESETS = ["veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
-QSV_PRESET_DEFAULT = "medium"
+# Quality range: 1 (best quality) – 51 (smallest file).  23 is a balanced default.
+QUALITY_DEFAULT = 23
+PRESETS = ["veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
+PRESET_DEFAULT = "medium"
 
 # Hardware-acceleration mode labels shown in the UI (filtered by platform)
 _HW_MODES_ALL = [
-    ("QSV – HW Encode",                "qsv",        ("win32", "linux")),
-    ("QSV – Full HW Pipeline",         "qsv_fullhw", ("win32", "linux")),
     ("AMF – HW Encode (AMD)",          "amf",        ("win32", "linux")),
     ("AMF – Full HW Pipeline (AMD)",   "amf_fullhw", ("win32",)),
     ("VideoToolbox – HW Encode",        "vt",         ("darwin",)),
@@ -223,7 +202,8 @@ def check_hw_available() -> set[str]:
             timeout=10,
         )
         out = result.stdout.lower()
-        found |= {name for name in ("qsv", "videotoolbox") if name in out}
+        if "videotoolbox" in out:
+            found.add("videotoolbox")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return found
 
@@ -260,19 +240,6 @@ def parse_crop(crop_str: str) -> tuple[int, int, int, int]:
         return int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
     except (IndexError, ValueError) as exc:
         raise ValueError(f"Invalid crop string: {crop_str!r}") from exc
-
-
-def crop_to_vf_qsv_fullhw(crop_filter: str, is_10bit: bool = False) -> str:
-    """Convert 'crop=W:H:X:Y' to a filter chain suitable for the full QSV HW pipeline.
-
-    Strategy: after QSV hardware decode (-hwaccel_output_format qsv) the
-    frames live on GPU surfaces.  We download to system memory, apply the
-    CPU crop filter, then upload the smaller frame back to QSV surfaces
-    for hardware encoding.  This avoids the fragile vpp_qsv crop parameter
-    differences across FFmpeg versions while still offloading decode/encode.
-    """
-    fmt = "p010le" if is_10bit else "nv12"
-    return f"hwdownload,format={fmt},{crop_filter},hwupload=extra_hw_frames=64"
 
 
 def crop_to_vf_vt_fullhw(crop_filter: str, is_10bit: bool = False) -> str:
@@ -339,7 +306,7 @@ def get_video_info(filepath: str) -> dict | None:
                 info["width"] = int(stream["width"])
                 info["height"] = int(stream["height"])
                 info["pix_fmt"] = stream.get("pix_fmt", "yuv420p")
-                # Detect 10-bit content – QSV h264 only supports 8-bit
+                # Detect 10-bit content (hardware H.264 encoders are 8-bit only)
                 info["is_10bit"] = "10" in stream.get("pix_fmt", "")
             elif stream["codec_type"] == "audio" and "audio_codec" not in info:
                 info["audio_codec"] = stream["codec_name"]
@@ -485,8 +452,6 @@ class EncodeWorker:
     """Runs ffmpeg encoding asynchronously via QProcess.
 
     Supports these hardware modes:
-      qsv         – software decode, QSV hardware encode  (Windows/Linux)
-      qsv_fullhw  – QSV hardware decode + crop + QSV encode  (fastest on Intel)
       amf         – software decode, AMD AMF hardware encode  (Windows/Linux)
       amf_fullhw  – d3d11va hardware decode + crop + AMF encode  (Windows, AMD)
       vt          – software decode, VideoToolbox hardware encode  (macOS)
@@ -502,7 +467,6 @@ class EncodeWorker:
         hw_mode: str,
         video_info: dict,
         quality: int,
-        look_ahead: bool,
         preset: str,
         on_progress,
         on_done,
@@ -525,39 +489,7 @@ class EncodeWorker:
         encoder: str
         enc_args: list[str] = []
 
-        if hw_mode in ("qsv", "qsv_fullhw"):
-            if video_codec == "h264" and is_10bit:
-                encoder = "libx264"
-                enc_args = ["-crf", str(quality), "-preset", preset]
-            else:
-                encoder = QSV_ENCODERS.get(video_codec, "h264_qsv")
-                enc_args = [
-                    "-global_quality",
-                    str(quality),
-                    "-preset",
-                    preset,
-                ]
-                if look_ahead and hw_mode != "qsv_fullhw":
-                    # look_ahead performs better when frames are in system memory
-                    enc_args += ["-look_ahead", "1", "-look_ahead_depth", "40"]
-
-            if hw_mode == "qsv_fullhw":
-                decoder = QSV_DECODERS.get(video_codec)
-                if decoder:
-                    pre_input_args = [
-                        "-hwaccel",
-                        "qsv",
-                        "-hwaccel_output_format",
-                        "qsv",
-                        "-c:v",
-                        decoder,
-                    ]
-                    vf_filter = crop_to_vf_qsv_fullhw(crop_filter, is_10bit)
-                else:
-                    # No QSV decoder for this codec – still use QSV encode
-                    vf_filter = crop_filter
-
-        elif hw_mode in ("amf", "amf_fullhw"):
+        if hw_mode in ("amf", "amf_fullhw"):
             encoder = AMF_ENCODERS.get(video_codec, "h264_amf")
             # AMF uses constant-QP rate control (-rc cqp) as the closest
             # analogue to CRF.  The 1–51 quality scale maps directly onto the
@@ -1452,7 +1384,6 @@ class BlackBarRemoveApp(QMainWindow):
         self._detect_index = 0
         self._active_detect_count = 0
         self._encode_index = 0
-        self._lookahead_saved = True
 
         self._build_ui()
         self._check_ffmpeg_on_startup()
@@ -1479,8 +1410,6 @@ class BlackBarRemoveApp(QMainWindow):
 
         hw_found = check_hw_available()
         hw_available = []
-        if sys.platform in ("win32", "linux") and "qsv" in hw_found:
-            hw_available.append("QSV")
         if sys.platform in ("win32", "linux") and "amf" in hw_found:
             hw_available.append("AMF (AMD)")
         if sys.platform == "darwin" and "videotoolbox" in hw_found:
@@ -1491,8 +1420,8 @@ class BlackBarRemoveApp(QMainWindow):
         else:
             if sys.platform in ("win32", "linux"):
                 self._log(
-                    "⚠  No Intel QSV or AMD AMF encoder found in this ffmpeg build.  "
-                    "Install an ffmpeg build with --enable-libmfx / --enable-amf "
+                    "⚠  No AMD AMF encoder found in this ffmpeg build.  "
+                    "Install an ffmpeg build with --enable-amf "
                     "(e.g. from https://github.com/BtbN/FFmpeg-Builds).  "
                     "CPU mode will still work."
                 )
@@ -1546,10 +1475,8 @@ class BlackBarRemoveApp(QMainWindow):
         self.cb_hw = QComboBox()
         for label, _key in HW_MODES:
             self.cb_hw.addItem(label)
-        self.cb_hw.setCurrentIndex(0)  # QSV – HW Encode is the default
+        self.cb_hw.setCurrentIndex(0)  # first mode for this platform is the default
         self.cb_hw.setToolTip(
-            "QSV – HW Encode:         Software decode, Intel QSV hardware encode\n"
-            "QSV – Full HW Pipeline:  Intel QSV decode + crop + encode  (fastest on Intel)\n"
             "AMF – HW Encode (AMD):        Software decode, AMD Radeon AMF hardware encode\n"
             "AMF – Full HW Pipeline (AMD): d3d11va decode + crop + AMF encode  (Windows, AMD)\n"
             "VideoToolbox – HW Encode:         Software decode, Apple VT hardware encode\n"
@@ -1565,9 +1492,9 @@ class BlackBarRemoveApp(QMainWindow):
         settings_layout.addWidget(QLabel("Quality:"))
         self.sp_quality = QSpinBox()
         self.sp_quality.setRange(1, 51)
-        self.sp_quality.setValue(QSV_QUALITY_DEFAULT)
+        self.sp_quality.setValue(QUALITY_DEFAULT)
         self.sp_quality.setToolTip(
-            "QSV: global_quality  (1 = best quality / largest file,  51 = worst / smallest)\n"
+            "1 = best quality / largest file,  51 = worst / smallest\n"
             "AMF: constant QP  (-rc cqp; same 1–51 scale, rescaled for AV1)\n"
             "VideoToolbox: quality mapped to 1.0–0.0 range\n"
             "CPU: CRF value  (same scale applies for libx264/libx265)"
@@ -1580,24 +1507,13 @@ class BlackBarRemoveApp(QMainWindow):
         # Preset
         settings_layout.addWidget(QLabel("Preset:"))
         self.cb_preset = QComboBox()
-        self.cb_preset.addItems(QSV_PRESETS)
-        self.cb_preset.setCurrentText(QSV_PRESET_DEFAULT)
+        self.cb_preset.addItems(PRESETS)
+        self.cb_preset.setCurrentText(PRESET_DEFAULT)
         self.cb_preset.setToolTip(
             "Encoding speed preset.  Slower = better compression.\n"
             "AMF (AMD) maps fast→speed, medium→balanced, slow→quality."
         )
         settings_layout.addWidget(self.cb_preset)
-
-        settings_layout.addSpacing(8)
-
-        # Look-ahead (QSV only)
-        self.chk_lookahead = QCheckBox("Look-ahead")
-        self.chk_lookahead.setChecked(True)
-        self.chk_lookahead.setToolTip(
-            "Enable QSV look-ahead for better rate control quality.\n"
-            "Disabled automatically in Full HW Pipeline mode."
-        )
-        settings_layout.addWidget(self.chk_lookahead)
 
         settings_layout.addSpacing(16)
 
@@ -1698,14 +1614,6 @@ class BlackBarRemoveApp(QMainWindow):
 
     def _on_hw_mode_changed(self, _index: int):
         mode = self._hw_mode_key()
-        if mode == "qsv":
-            self.chk_lookahead.setEnabled(True)
-            self.chk_lookahead.setChecked(self._lookahead_saved)
-        else:
-            if self.chk_lookahead.isEnabled():
-                self._lookahead_saved = self.chk_lookahead.isChecked()
-            self.chk_lookahead.setEnabled(False)
-            self.chk_lookahead.setChecked(False)
         self.cb_preset.setEnabled(mode not in ("vt", "vt_fullhw"))
 
     # ------------------------------------------------------------------
@@ -1972,8 +1880,7 @@ class BlackBarRemoveApp(QMainWindow):
         self._log(
             f"Processing {len(self.encode_queue)} file(s) "
             f"[mode={hw_mode}, quality={self.sp_quality.value()}, "
-            f"preset={self.cb_preset.currentText()}, "
-            f"look_ahead={self.chk_lookahead.isChecked() and hw_mode == 'qsv'}]"
+            f"preset={self.cb_preset.currentText()}]"
         )
 
         self.btn_detect.setEnabled(False)
@@ -2022,7 +1929,6 @@ class BlackBarRemoveApp(QMainWindow):
             hw_mode=hw_mode,
             video_info=info,
             quality=self.sp_quality.value(),
-            look_ahead=self.chk_lookahead.isChecked() and hw_mode == "qsv",
             preset=self.cb_preset.currentText(),
             on_progress=self._on_encode_progress,
             on_done=self._on_encode_done,

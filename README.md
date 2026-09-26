@@ -19,15 +19,12 @@ A desktop application that detects and removes black bars (letterboxing and pill
 - **Hardware-aware encoding modes**:
   | Mode | Description |
   |------|-------------|
-  | QSV – HW Encode | Software decode + Intel QSV hardware encode (most compatible) |
-  | QSV – Full HW Pipeline | QSV decode + crop + QSV encode (fastest; requires a QSV-capable decoder) |
   | AMF (AMD) – HW Encode | Software decode + AMD AMF hardware encode (RDNA/RDNA2/RDNA3/RDNA4 GPUs incl. RX 9070 XT) |
-  | AMF (AMD) – Full HW Pipeline | D3D11VA (Windows) / VAAPI (Linux) decode + crop + AMF encode |
+  | AMF (AMD) – Full HW Pipeline | D3D11VA decode + crop + AMF encode (Windows only) |
   | VideoToolbox – HW Encode | Software decode + Apple VideoToolbox hardware encode on macOS |
   | VideoToolbox – Full HW Pipeline | VideoToolbox decode + crop + encode on macOS |
   | CPU – Software | libx264 / libx265 fully in software (universal fallback) |
-- **Quality & preset controls** — global_quality (QSV), CQP (AMF), VideoToolbox quality, or CRF (CPU), plus speed preset
-- **Look-ahead** toggle for better QSV rate control
+- **Quality & preset controls** — CQP (AMF), VideoToolbox quality, or CRF (CPU), plus speed preset
 - **Overwrite original** option (encodes to a temp file, then replaces with backup/restore protection)
 - **Per-file status** table with live encoding progress bar
 
@@ -67,7 +64,7 @@ FFmpeg must be installed and accessible. The application searches these location
 6. macOS Homebrew: `/opt/homebrew/bin/` or `/usr/local/bin/`
 7. Linux: `/usr/bin/`, `/usr/local/bin/`, `/snap/bin/`, or `~/bin/`
 
-#### Recommended FFmpeg build (includes QSV support)
+#### Recommended FFmpeg build (includes AMF support)
 Download a full build from **[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)** — choose a `ffmpeg-master-latest-win64-gpl` release.
 
 #### Quick install options
@@ -83,14 +80,6 @@ choco install ffmpeg
 ```
 
 ### Hardware acceleration (optional)
-
-#### Intel Quick Sync Video
-QSV modes require:
-- An Intel CPU or GPU with Quick Sync support (6th gen "Skylake" or newer recommended)
-- An FFmpeg build compiled with `--enable-libmfx` or `--enable-qsv`
-- Up-to-date Intel graphics drivers
-
-If QSV is unavailable the app warns on startup and **CPU mode still works normally**.
 
 #### AMD AMF (Advanced Media Framework)
 AMF modes require:
@@ -159,10 +148,9 @@ wails build
 ### 4. Configure encoding
 | Setting | Description |
 |---------|-------------|
-| HW Mode | QSV / VideoToolbox / CPU modes, filtered by platform |
-| Quality | 1 (best) – 51 (smallest); maps to `global_quality` (QSV), VideoToolbox quality, or `CRF` (CPU) |
+| HW Mode | AMF / VideoToolbox / CPU modes, filtered by platform |
+| Quality | 1 (best) – 51 (smallest); maps to constant QP (AMF), VideoToolbox quality, or `CRF` (CPU) |
 | Preset | Encoding speed: `veryfast` → `veryslow` |
-| Look-ahead | Enable QSV look-ahead for better rate control (QSV HW Encode only) |
 | Suffix | String appended to output filename (default `_nocrop`) |
 | Overwrite original | Encode to a temporary file, then replace the source with backup/restore protection |
 
@@ -175,15 +163,14 @@ wails build
 
 ## Codec Support Matrix
 
-| Source Codec | QSV Decoder | QSV Encoder | AMF Encoder | CPU Fallback |
-|---|---|---|---|---|
-| H.264 (8-bit) | `h264_qsv` | `h264_qsv` | `h264_amf` | `libx264` |
-| H.264 (10-bit) | `h264_qsv` | *(falls back to CPU)* | *(falls back to CPU)* | `libx264` |
-| HEVC / H.265 | `hevc_qsv` | `hevc_qsv` | `hevc_amf` | `libx265` |
-| AV1 | `av1_qsv` | `av1_qsv` | `av1_amf` (RDNA3+) | — |
-| VP9 | `vp9_qsv` | — | — | `libvpx-vp9` |
-| MPEG-2 | `mpeg2_qsv` | — | — | — |
-| VC-1 | `vc1_qsv` | — | — | — |
+| Source Codec | AMF Encoder | VideoToolbox Encoder | CPU Encoder |
+|---|---|---|---|
+| H.264 (8-bit) | `h264_amf` | `h264_videotoolbox` | `libx264` |
+| H.264 (10-bit) | `h264_amf` (8-bit only — use CPU) | `h264_videotoolbox` (8-bit only — use CPU) | `libx264` |
+| HEVC / H.265 | `hevc_amf` | `hevc_videotoolbox` | `libx265` |
+| AV1 | `av1_amf` (RDNA3+) | `h264_videotoolbox` | `libx264` |
+| VP9 | `h264_amf` | `h264_videotoolbox` | `libvpx-vp9` |
+| Other | `h264_amf` | `h264_videotoolbox` | `libx264` |
 
 Audio and subtitle streams are always copied without re-encoding.
 
@@ -216,7 +203,7 @@ Encoding captures the tail of FFmpeg stderr and logs it on failure, which makes 
 blackbar_remove.py
 ├── Constants & codec maps
 ├── find_ffmpeg_tool()       — PATH + known install locations (no subprocess)
-├── check_qsv_available()    — probes FFmpeg hwaccels list
+├── check_hw_available()     — probes FFmpeg hwaccels + encoders lists
 ├── get_video_info()         — ffprobe JSON → stream metadata
 ├── extract_frame()          — single-frame PNG extraction via ffmpeg
 ├── calc_crop_for_aspect()   — geometry helper for standard aspect ratios
@@ -234,12 +221,6 @@ The Python app uses `QProcess` for detection and encoding, and a `ThreadPoolExec
 
 **`ffmpeg not found`**
 Add ffmpeg to your system PATH or place the binary at `C:\ffmpeg\bin\ffmpeg.exe`.
-
-**`QSV does not appear to be available`**
-Install a QSV-enabled FFmpeg build (see [Requirements](#requirements)) and update Intel graphics drivers. Switch to **CPU – Software** mode in the meantime.
-
-**Encoding error with QSV**
-Some codec/format combinations lack a QSV encoder. Switch to **CPU – Software** mode; the FFmpeg error shown in the status log should identify the exact failure.
 
 **Encoding error with AMF**
 `av1_amf` only runs on RDNA3 (RX 7000) or newer GPUs. For older AMD cards, pick HEVC/H.264 source codecs or switch to **CPU – Software**. Update Adrenalin drivers if AMF reports `NotSupported`.
