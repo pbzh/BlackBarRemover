@@ -765,7 +765,7 @@ class CropCanvas(QLabel):
 
             # Restore the crop region at full brightness
             p.setOpacity(1.0)
-            p.drawPixmap(dx, dy, scaled, dx, dy, dw2, dh2)
+            p.drawPixmap(dx, dy, self._scaled_cache, dx, dy, dw2, dh2)
 
             # Red border
             p.setPen(QPen(Qt.GlobalColor.red, 2))
@@ -899,6 +899,11 @@ class PreviewPanel(QWidget):
     """Side-by-side preview with time scrubber, crop overlay and manual crop editing."""
 
     crop_changed = pyqtSignal(str, str)  # (filepath, new_crop_string)
+    # Internal: emitted from frame-extraction threads; Qt queues delivery onto
+    # the GUI thread.  (QTimer.singleShot from a plain Python thread is never
+    # delivered, because that thread has no Qt event loop.)
+    _frames_ready = pyqtSignal(int, object, object, str)  # (gen, orig_path, crop_path, crop)
+    _crop_frame_ready = pyqtSignal(int, object)           # (gen, crop_path)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -907,6 +912,8 @@ class PreviewPanel(QWidget):
         self._orig_pixmap: QPixmap | None = None
         self._suppress_spinbox_signals = False
         self._frame_load_gen = 0
+        self._frames_ready.connect(self._on_frames_loaded)
+        self._crop_frame_ready.connect(self._on_crop_frame_loaded)
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -1279,7 +1286,7 @@ class PreviewPanel(QWidget):
                 f_crop = pool.submit(extract_frame, path, timestamp, crop)
                 orig_path = f_orig.result()
                 crop_path = f_crop.result()
-            QTimer.singleShot(0, lambda: self._on_frames_loaded(gen, orig_path, crop_path, crop))
+            self._frames_ready.emit(gen, orig_path, crop_path, crop)
 
         threading.Thread(target=_load, daemon=True).start()
 
@@ -1323,7 +1330,7 @@ class PreviewPanel(QWidget):
 
         def _load():
             crop_path = extract_frame(path, timestamp, crop)
-            QTimer.singleShot(0, lambda: self._on_crop_frame_loaded(gen, crop_path))
+            self._crop_frame_ready.emit(gen, crop_path)
 
         threading.Thread(target=_load, daemon=True).start()
 
