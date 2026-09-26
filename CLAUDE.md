@@ -26,7 +26,7 @@ python blackbar_remove.py
 
 ### Data Flow
 1. **File loading** → extract metadata via `ffprobe` (resolution, codec, duration)
-2. **Crop detection** → run `ffmpeg -vf "fps=1/N,cropdetect=limit=0.0941:round=16:reset=0"` (limit is a fraction of max pixel value — `CROPDETECT_LIMIT` = 24/255 — so it works for 8- and 10-bit sources), collect all reported crop regions, pick the most frequent one
+2. **Crop detection** → run `ffmpeg -vf "fps=1/N,cropdetect=limit=0.0941:round=16:reset=0"` (limit is a fraction of max pixel value — `CROPDETECT_LIMIT` = 24/255 — so it works for 8- and 10-bit sources), collect all reported crop regions, pick the most frequent one. `effective_sample_interval()` tightens N for short clips so every clip yields at least `MIN_DETECT_SAMPLES` (10) frames
 3. **Preview** → extract one PNG frame at the scrubber timestamp; the "after" pane shows the crop region of that same frame (crop is pixel-exact, so no second ffmpeg call and it updates live while editing)
 4. **Encoding** → construct FFmpeg args based on codec + hardware mode, run with progress piped back to UI
 

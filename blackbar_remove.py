@@ -122,6 +122,10 @@ CROPDETECT_LIMIT = 24 / 255
 # Maximum concurrent cropdetect workers when processing a batch
 MAX_DETECT_WORKERS = 4
 
+# Crop detection samples at least this many frames per clip; shorter clips get
+# a tighter sample interval than the one set in the UI.
+MIN_DETECT_SAMPLES = 10
+
 # Quality range: 1 (best quality) – 51 (smallest file).  23 is a balanced default.
 QUALITY_DEFAULT = 23
 PRESETS = ["veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
@@ -427,6 +431,15 @@ def calc_crop_for_aspect(
     return new_w, new_h, off_x, off_y
 
 
+def effective_sample_interval(interval: float, duration: float) -> float:
+    """Sample interval for cropdetect, tightened so that a clip yields at least
+    MIN_DETECT_SAMPLES frames (a clip shorter than the interval would otherwise
+    yield none and detection would fail)."""
+    if duration > 0 and duration < interval * MIN_DETECT_SAMPLES:
+        return max(0.1, round(duration / MIN_DETECT_SAMPLES, 2))
+    return interval
+
+
 def format_timestamp(seconds: float) -> str:
     h = int(seconds) // 3600
     m = (int(seconds) % 3600) // 60
@@ -450,7 +463,7 @@ def _clamp(v: int, lo: int, hi: int) -> int:
 class CropDetectWorker:
     """Runs ffmpeg cropdetect asynchronously via QProcess."""
 
-    def __init__(self, filepath: str, sample_interval: int, on_done):
+    def __init__(self, filepath: str, sample_interval: float, on_done):
         self.filepath = filepath
         self.sample_interval = sample_interval
         self.on_done = on_done
@@ -2041,10 +2054,15 @@ class BlackBarRemoveApp(QMainWindow):
         self._active_detect_count += 1
         info = self.files[idx]
         self.table.setItem(idx, 5, QTableWidgetItem("Detecting…"))
-        self._log(f"Detecting: {Path(info['path']).name}")
+        interval = effective_sample_interval(self.sp_interval.value(), info.get("duration", 0))
+        note = (
+            f"  (short clip: sampling every {interval:g} s)"
+            if interval != self.sp_interval.value() else ""
+        )
+        self._log(f"Detecting: {Path(info['path']).name}{note}")
         worker = CropDetectWorker(
             info["path"],
-            self.sp_interval.value(),
+            interval,
             lambda fp, crop, row=idx: self._on_crop_detected(fp, crop, row),
         )
         self.crop_workers.append(worker)
