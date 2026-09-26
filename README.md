@@ -141,6 +141,27 @@ pyinstaller --noconfirm --windowed --name "BlackBar Remover" \
   --icon assets/appicon.png --add-data "assets:assets" blackbar_remove.py
 ```
 
+### Windows app (x64, e.g. AMD RX 9000 series)
+
+The **Build Windows app** workflow (`.github/workflows/build-windows.yml`) builds
+`BlackBar Remover.exe` on a Windows runner. It runs on the same kind of pushes as the macOS
+build and can be started manually. Download the `BlackBarRemover-windows-x64` artifact,
+unzip it, and run `BlackBar Remover.exe` from inside the unzipped folder (keep the files
+next to it). Windows SmartScreen may warn because the app is unsigned: **More info → Run anyway**.
+
+FFmpeg is not bundled. For AMD AMF encoding, download `ffmpeg-master-latest-win64-gpl`
+from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) and put `ffmpeg.exe` and
+`ffprobe.exe` in `C:\ffmpeg\bin` (or anywhere on `PATH`), with current AMD Adrenalin drivers
+installed. Check with `ffmpeg -hide_banner -encoders | findstr amf`.
+
+To build locally on Windows instead (PowerShell):
+
+```powershell
+py -m pip install PyQt6 pyinstaller pillow
+py -m PyInstaller --noconfirm --windowed --name "BlackBar Remover" `
+  --icon assets/appicon.png --add-data "assets;assets" blackbar_remove.py
+```
+
 ---
 
 ## Usage

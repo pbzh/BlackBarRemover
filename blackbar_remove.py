@@ -151,6 +151,20 @@ ASPECT_RATIOS = [
 # ---------------------------------------------------------------------------
 
 
+def run_hidden(*args, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run that never opens a console window.
+
+    In a windowed Windows build (PyInstaller --windowed / pythonw) every
+    console child process would otherwise flash a cmd window — noticeable
+    for ffprobe on each file and ffmpeg on each preview frame.  QProcess
+    already suppresses this on its own.
+    """
+    if sys.platform == "win32":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return subprocess.run(*args, **kwargs)
+
+
+
 def find_ffmpeg_tool(name: str) -> str:
     """Locate an ffmpeg tool on the current platform.
 
@@ -200,7 +214,7 @@ def check_hw_available() -> set[str]:
     """Return the set of hardware accelerators available in this FFmpeg build."""
     found: set[str] = set()
     try:
-        result = subprocess.run(
+        result = run_hidden(
             [FFMPEG, "-hide_banner", "-hwaccels"],
             capture_output=True,
             text=True,
@@ -215,7 +229,7 @@ def check_hw_available() -> set[str]:
     # AMD AMF encoders are not listed by -hwaccels (that lists decode
     # accelerators), so probe the encoder list for h264_amf instead.
     try:
-        result = subprocess.run(
+        result = run_hidden(
             [FFMPEG, "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
@@ -286,7 +300,7 @@ def amf_quality_from_preset(preset: str) -> str:
 def get_video_info(filepath: str) -> dict | None:
     """Return video/audio stream metadata via ffprobe, or None on failure."""
     try:
-        result = subprocess.run(
+        result = run_hidden(
             [
                 FFPROBE,
                 "-v",
@@ -341,7 +355,7 @@ def extract_frame(
 
     vf = crop_filter if crop_filter else "null"
     try:
-        result = subprocess.run(
+        result = run_hidden(
             [
                 FFMPEG,
                 "-ss",
@@ -1444,7 +1458,7 @@ class BlackBarRemoveApp(QMainWindow):
     def _check_ffmpeg_on_startup(self):
         """Warn the user if ffmpeg is not found or HW accel is unavailable."""
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 [FFMPEG, "-version"], capture_output=True, timeout=8
             )
             if result.returncode != 0:

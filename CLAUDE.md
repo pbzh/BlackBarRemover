@@ -18,6 +18,8 @@ pip install PyQt6
 python blackbar_remove.py
 ```
 
+**Builds:** GitHub Actions workflows `build-macos.yml` (Apple Silicon .app) and `build-windows.yml` (x64 .exe) package the app with PyInstaller and upload zipped artifacts.
+
 **Requirements:** Python 3.10+ (uses `X | Y` type unions), PyQt6, and FFmpeg installed on the system (with the `h264_amf` encoder for AMD hardware acceleration — e.g. a BtbN FFmpeg build on Windows).
 
 ## Architecture
@@ -56,6 +58,7 @@ Uses `ThreadPoolExecutor` for parallel frame extraction; QProcess for non-blocki
 
 ## FFmpeg Integration Notes
 
+- Blocking ffmpeg/ffprobe calls go through `run_hidden()` (adds `CREATE_NO_WINDOW` on Windows) — never call `subprocess.run` directly, or the windowed .exe flashes console windows
 - Tool discovery checks PATH first, then platform-specific locations (`/opt/homebrew/bin/` on macOS, `C:\ffmpeg\bin\` on Windows)
 - `ffprobe` output parsed as JSON; 10-bit depth detected from pixel format string containing `10`
 - Cropdetect collects all `crop=W:H:X:Y` lines from stderr, returns the most common value
