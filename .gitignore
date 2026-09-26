@@ -34,4 +34,5 @@ desktop.ini
 
 # Temp / output files (don't accidentally commit encoded videos)
 *_nocrop.*
+*_cropped.*
 *_tmp.*

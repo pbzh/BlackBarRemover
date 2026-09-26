@@ -13,8 +13,8 @@ A desktop application that detects and removes black bars (letterboxing and pill
 ## Features
 
 - **Automatic black bar detection** via FFmpeg's `cropdetect` filter, sampling frames at a configurable interval
-- **Side-by-side preview** with a time scrubber — see the original and cropped frame before committing
-- **Manual crop editor** — override detected values with exact W/H/X/Y spinboxes or pick a standard aspect ratio
+- **Before/after preview** with a time scrubber, zoom (up to 1600 %, Ctrl/⌘ + wheel or trackpad pinch), drag-to-pan with both panes kept in sync, and a side-by-side / stacked layout toggle
+- **Manual crop editor** — drag the crop box or its handles, type exact W/H/X/Y values, or pick a standard aspect ratio; changes apply immediately
 - **Batch processing** — drop a whole folder; detection runs up to 4 files in parallel
 - **Hardware-aware encoding modes**:
   | Mode | Description |
@@ -177,10 +177,11 @@ py -m PyInstaller --noconfirm --windowed --name "BlackBar Remover" `
 - Files with no black bars are marked *No black bars* and skipped during processing
 
 ### 3. Preview & adjust (optional)
-- Select a row and click **Preview** (or click a row after detection completes — auto-preview kicks in)
+- Select or double-click a row (after detection the first file with bars is previewed automatically)
 - Scrub the timeline to check different timestamps
-- Use the **Aspect Ratio** dropdown or the **W / H / X / Y** spinboxes to fine-tune the crop
-- Click **Apply** to commit manual changes, **Reset** to revert to auto-detected values
+- Adjust the crop by dragging the red box or its handles, with the **Aspect** dropdown, or the **W / H / X / Y** fields — edits apply immediately (values snap to even numbers); **Reset** reverts to the detected crop
+- Zoom with **− / + / Fit / 1:1**, Ctrl/⌘ + mouse wheel, trackpad pinch, or Ctrl/⌘ `+` `−` `0` (fit) `1` (100 %); drag the image to pan. From 200 % pixels are shown unsmoothed so bar edges can be checked exactly
+- **⇅ / ⇆** switches between side-by-side and stacked panes
 
 ### 4. Configure encoding
 | Setting | Description |
@@ -188,7 +189,7 @@ py -m PyInstaller --noconfirm --windowed --name "BlackBar Remover" `
 | HW Mode | AMF / VideoToolbox / CPU modes, filtered by platform |
 | Quality | 1 (best) – 51 (smallest); maps to constant QP (AMF), VideoToolbox quality, or `CRF` (CPU) |
 | Preset | Encoding speed: `veryfast` → `veryslow` |
-| Suffix | String appended to output filename (default `_nocrop`) |
+| Output suffix | String appended to output filename (default `_cropped`) |
 | Overwrite original | Encode to a temporary file, then replace the source with backup/restore protection |
 
 ### 5. Process
@@ -246,11 +247,12 @@ blackbar_remove.py
 ├── calc_crop_for_aspect()   — geometry helper for standard aspect ratios
 ├── CropDetectWorker         — async QProcess wrapper for cropdetect
 ├── EncodeWorker             — async QProcess wrapper for encoding
-├── PreviewPanel             — side-by-side QWidget with scrubber & crop editor
+├── ZoomImageView / CropCanvas / ZoomScrollArea — zoomable frame views, crop overlay, pan & zoom input
+├── PreviewPanel             — before/after panes with scrubber, zoom & crop editor
 └── BlackBarRemoveApp        — QMainWindow, table, batch orchestration
 ```
 
-The Python app uses `QProcess` for detection and encoding, and a `ThreadPoolExecutor` for preview frame extraction.
+The Python app uses `QProcess` for detection and encoding, a `ThreadPoolExecutor` for parallel ffprobe on load, and a background thread for preview frame extraction.
 
 ---
 
