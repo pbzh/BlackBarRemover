@@ -11,6 +11,7 @@ Built with Python and PyQt6. Runs on Windows, macOS (Apple Silicon) and Linux.
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 ![FFmpeg](https://img.shields.io/badge/FFmpeg-required-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
+![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-D97757)
 
 ---
 
@@ -230,6 +231,17 @@ blackbar_remove.py
   stream with the crop filter — so cover art, subtitles and audio pass through untouched.
 - FFmpeg runs through `QProcess` (detection, encoding) and background threads (ffprobe, frame
   extraction), so the UI never blocks.
+
+---
+
+## Credits
+
+BlackBar Remover was created by [pbzh](https://github.com/pbzh) and developed together with
+**Claude**, Anthropic's AI assistant, using [Claude Code](https://claude.com/claude-code).
+Claude wrote large parts of the app — including the AMD AMF encoding support, the zoomable
+before/after preview and crop editor, the fixes for 10-bit detection, cover art and
+VideoToolbox quality, and the Windows/macOS build workflows. Commits authored or co-authored by
+Claude are marked as such in the git history.
 
 ---
 
