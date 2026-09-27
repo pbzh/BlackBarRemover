@@ -1,0 +1,63 @@
+name: Build Windows app
+
+# Builds "BlackBar Remover.exe" (x64, windowed) with PyInstaller and uploads the
+# app folder (zipped) as a workflow artifact. FFmpeg is not bundled; install a
+# build with AMF support (e.g. BtbN ffmpeg-master-latest-win64-gpl) in
+# C:\ffmpeg\bin or on PATH.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - blackbar_remove.py
+      - assets/**
+      - .github/workflows/build-windows.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyQt6 pyinstaller pillow  # pillow converts the PNG icon to .ico
+
+      - name: Check hidden subprocess helper on Windows
+        run: |
+          python -c "import blackbar_remove as b; r = b.run_hidden(['cmd', '/c', 'echo', 'ok'], capture_output=True, text=True); assert r.stdout.strip() == 'ok', r; print('run_hidden ok')"
+
+      - name: Build .exe
+        run: |
+          pyinstaller --noconfirm --clean --windowed `
+            --name "BlackBar Remover" `
+            --icon assets/appicon.png `
+            --add-data "assets;assets" `
+            blackbar_remove.py
+
+      - name: Smoke test (app starts and stays up)
+        run: |
+          $p = Start-Process -FilePath "dist\BlackBar Remover\BlackBar Remover.exe" -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) { Write-Error "App exited early (code $($p.ExitCode))"; exit 1 }
+          Write-Host "App is running"
+          Stop-Process -Id $p.Id -Force
+
+      - name: Zip app folder
+        run: Compress-Archive -Path "dist\BlackBar Remover" -DestinationPath BlackBarRemover-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BlackBarRemover-windows-x64
+          path: BlackBarRemover-windows-x64.zip
+          retention-days: 30

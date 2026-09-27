@@ -13,21 +13,18 @@ A desktop application that detects and removes black bars (letterboxing and pill
 ## Features
 
 - **Automatic black bar detection** via FFmpeg's `cropdetect` filter, sampling frames at a configurable interval
-- **Side-by-side preview** with a time scrubber — see the original and cropped frame before committing
-- **Manual crop editor** — override detected values with exact W/H/X/Y spinboxes or pick a standard aspect ratio
+- **Before/after preview** with a time scrubber, zoom (up to 1600 %, Ctrl/⌘ + wheel or trackpad pinch), drag-to-pan with both panes kept in sync, and a side-by-side / stacked layout toggle
+- **Manual crop editor** — drag the crop box or its handles, type exact W/H/X/Y values, or pick a standard aspect ratio; changes apply immediately
 - **Batch processing** — drop a whole folder; detection runs up to 4 files in parallel
 - **Hardware-aware encoding modes**:
   | Mode | Description |
   |------|-------------|
-  | QSV – HW Encode | Software decode + Intel QSV hardware encode (most compatible) |
-  | QSV – Full HW Pipeline | QSV decode + crop + QSV encode (fastest; requires a QSV-capable decoder) |
   | AMF (AMD) – HW Encode | Software decode + AMD AMF hardware encode (RDNA/RDNA2/RDNA3/RDNA4 GPUs incl. RX 9070 XT) |
-  | AMF (AMD) – Full HW Pipeline | D3D11VA (Windows) / VAAPI (Linux) decode + crop + AMF encode |
+  | AMF (AMD) – Full HW Pipeline | D3D11VA decode + crop + AMF encode (Windows only) |
   | VideoToolbox – HW Encode | Software decode + Apple VideoToolbox hardware encode on macOS |
   | VideoToolbox – Full HW Pipeline | VideoToolbox decode + crop + encode on macOS |
   | CPU – Software | libx264 / libx265 fully in software (universal fallback) |
-- **Quality & preset controls** — global_quality (QSV), CQP (AMF), VideoToolbox quality, or CRF (CPU), plus speed preset
-- **Look-ahead** toggle for better QSV rate control
+- **Quality & preset controls** — CQP (AMF), VideoToolbox quality, or CRF (CPU), plus speed preset
 - **Overwrite original** option (encodes to a temp file, then replaces with backup/restore protection)
 - **Per-file status** table with live encoding progress bar
 
@@ -67,7 +64,7 @@ FFmpeg must be installed and accessible. The application searches these location
 6. macOS Homebrew: `/opt/homebrew/bin/` or `/usr/local/bin/`
 7. Linux: `/usr/bin/`, `/usr/local/bin/`, `/snap/bin/`, or `~/bin/`
 
-#### Recommended FFmpeg build (includes QSV support)
+#### Recommended FFmpeg build (includes AMF support)
 Download a full build from **[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)** — choose a `ffmpeg-master-latest-win64-gpl` release.
 
 #### Quick install options
@@ -83,14 +80,6 @@ choco install ffmpeg
 ```
 
 ### Hardware acceleration (optional)
-
-#### Intel Quick Sync Video
-QSV modes require:
-- An Intel CPU or GPU with Quick Sync support (6th gen "Skylake" or newer recommended)
-- An FFmpeg build compiled with `--enable-libmfx` or `--enable-qsv`
-- Up-to-date Intel graphics drivers
-
-If QSV is unavailable the app warns on startup and **CPU mode still works normally**.
 
 #### AMD AMF (Advanced Media Framework)
 AMF modes require:
@@ -120,20 +109,57 @@ brew install ffmpeg
 
 ## Installation
 
-### Run the Wails app
+### Run from source
 
 ```bash
 git clone https://github.com/pbzh/BlackBarRemover.git
 cd BlackBarRemover
-cd wails-app
-wails dev
+pip install PyQt6
+python blackbar_remove.py
 ```
 
-### Build a desktop binary
+### macOS app (Apple Silicon)
+
+The **Build macOS app** GitHub Actions workflow (`.github/workflows/build-macos.yml`)
+builds `BlackBar Remover.app` with PyInstaller on an Apple Silicon runner. It runs on
+pushes that touch the app, the assets or the workflow, and can be started manually
+from the Actions tab. Download the `BlackBarRemover-macos-arm64` artifact from the run.
+
+The app is unsigned, so remove the quarantine flag after unzipping:
 
 ```bash
-cd wails-app
-wails build
+xattr -dr com.apple.quarantine "BlackBar Remover.app"
+```
+
+FFmpeg is not bundled; install it with `brew install ffmpeg`.
+
+To build locally on a Mac instead:
+
+```bash
+pip install PyQt6 pyinstaller pillow
+pyinstaller --noconfirm --windowed --name "BlackBar Remover" \
+  --icon assets/appicon.png --add-data "assets:assets" blackbar_remove.py
+```
+
+### Windows app (x64, e.g. AMD RX 9000 series)
+
+The **Build Windows app** workflow (`.github/workflows/build-windows.yml`) builds
+`BlackBar Remover.exe` on a Windows runner. It runs on the same kind of pushes as the macOS
+build and can be started manually. Download the `BlackBarRemover-windows-x64` artifact,
+unzip it, and run `BlackBar Remover.exe` from inside the unzipped folder (keep the files
+next to it). Windows SmartScreen may warn because the app is unsigned: **More info → Run anyway**.
+
+FFmpeg is not bundled. For AMD AMF encoding, download `ffmpeg-master-latest-win64-gpl`
+from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) and put `ffmpeg.exe` and
+`ffprobe.exe` in `C:\ffmpeg\bin` (or anywhere on `PATH`), with current AMD Adrenalin drivers
+installed. Check with `ffmpeg -hide_banner -encoders | findstr amf`.
+
+To build locally on Windows instead (PowerShell):
+
+```powershell
+py -m pip install PyQt6 pyinstaller pillow
+py -m PyInstaller --noconfirm --windowed --name "BlackBar Remover" `
+  --icon assets/appicon.png --add-data "assets;assets" blackbar_remove.py
 ```
 
 ---
@@ -151,19 +177,19 @@ wails build
 - Files with no black bars are marked *No black bars* and skipped during processing
 
 ### 3. Preview & adjust (optional)
-- Select a row and click **Preview** (or click a row after detection completes — auto-preview kicks in)
+- Select or double-click a row (after detection the first file with bars is previewed automatically)
 - Scrub the timeline to check different timestamps
-- Use the **Aspect Ratio** dropdown or the **W / H / X / Y** spinboxes to fine-tune the crop
-- Click **Apply** to commit manual changes, **Reset** to revert to auto-detected values
+- Adjust the crop by dragging the red box or its handles, with the **Aspect** dropdown, or the **W / H / X / Y** fields — edits apply immediately (values snap to even numbers); **Reset** reverts to the detected crop
+- Zoom with **− / + / Fit / 1:1**, Ctrl/⌘ + mouse wheel, trackpad pinch, or Ctrl/⌘ `+` `−` `0` (fit) `1` (100 %); drag the image to pan. From 200 % pixels are shown unsmoothed so bar edges can be checked exactly
+- **⇅ / ⇆** switches between side-by-side and stacked panes
 
 ### 4. Configure encoding
 | Setting | Description |
 |---------|-------------|
-| HW Mode | QSV / VideoToolbox / CPU modes, filtered by platform |
-| Quality | 1 (best) – 51 (smallest); maps to `global_quality` (QSV), VideoToolbox quality, or `CRF` (CPU) |
+| HW Mode | AMF / VideoToolbox / CPU modes, filtered by platform |
+| Quality | 1 (best) – 51 (smallest); maps to constant QP (AMF), VideoToolbox quality, or `CRF` (CPU) |
 | Preset | Encoding speed: `veryfast` → `veryslow` |
-| Look-ahead | Enable QSV look-ahead for better rate control (QSV HW Encode only) |
-| Suffix | String appended to output filename (default `_nocrop`) |
+| Output suffix | String appended to output filename (default `_cropped`) |
 | Overwrite original | Encode to a temporary file, then replace the source with backup/restore protection |
 
 ### 5. Process
@@ -175,15 +201,14 @@ wails build
 
 ## Codec Support Matrix
 
-| Source Codec | QSV Decoder | QSV Encoder | AMF Encoder | CPU Fallback |
-|---|---|---|---|---|
-| H.264 (8-bit) | `h264_qsv` | `h264_qsv` | `h264_amf` | `libx264` |
-| H.264 (10-bit) | `h264_qsv` | *(falls back to CPU)* | *(falls back to CPU)* | `libx264` |
-| HEVC / H.265 | `hevc_qsv` | `hevc_qsv` | `hevc_amf` | `libx265` |
-| AV1 | `av1_qsv` | `av1_qsv` | `av1_amf` (RDNA3+) | — |
-| VP9 | `vp9_qsv` | — | — | `libvpx-vp9` |
-| MPEG-2 | `mpeg2_qsv` | — | — | — |
-| VC-1 | `vc1_qsv` | — | — | — |
+| Source Codec | AMF Encoder | VideoToolbox Encoder | CPU Encoder |
+|---|---|---|---|
+| H.264 (8-bit) | `h264_amf` | `h264_videotoolbox` | `libx264` |
+| H.264 (10-bit) | `h264_amf` (8-bit only — use CPU) | `h264_videotoolbox` (8-bit only — use CPU) | `libx264` |
+| HEVC / H.265 | `hevc_amf` | `hevc_videotoolbox` | `libx265` |
+| AV1 | `av1_amf` (RDNA3+) | `h264_videotoolbox` | `libx264` |
+| VP9 | `h264_amf` | `h264_videotoolbox` | `libvpx-vp9` |
+| Other | `h264_amf` | `h264_videotoolbox` | `libx264` |
 
 Audio and subtitle streams are always copied without re-encoding.
 
@@ -216,17 +241,18 @@ Encoding captures the tail of FFmpeg stderr and logs it on failure, which makes 
 blackbar_remove.py
 ├── Constants & codec maps
 ├── find_ffmpeg_tool()       — PATH + known install locations (no subprocess)
-├── check_qsv_available()    — probes FFmpeg hwaccels list
+├── check_hw_available()     — probes FFmpeg hwaccels + encoders lists
 ├── get_video_info()         — ffprobe JSON → stream metadata
 ├── extract_frame()          — single-frame PNG extraction via ffmpeg
 ├── calc_crop_for_aspect()   — geometry helper for standard aspect ratios
 ├── CropDetectWorker         — async QProcess wrapper for cropdetect
 ├── EncodeWorker             — async QProcess wrapper for encoding
-├── PreviewPanel             — side-by-side QWidget with scrubber & crop editor
+├── ZoomImageView / CropCanvas / ZoomScrollArea — zoomable frame views, crop overlay, pan & zoom input
+├── PreviewPanel             — before/after panes with scrubber, zoom & crop editor
 └── BlackBarRemoveApp        — QMainWindow, table, batch orchestration
 ```
 
-The Python app uses `QProcess` for detection and encoding, and a `ThreadPoolExecutor` for preview frame extraction.
+The Python app uses `QProcess` for detection and encoding, a `ThreadPoolExecutor` for parallel ffprobe on load, and a background thread for preview frame extraction.
 
 ---
 
@@ -234,12 +260,6 @@ The Python app uses `QProcess` for detection and encoding, and a `ThreadPoolExec
 
 **`ffmpeg not found`**
 Add ffmpeg to your system PATH or place the binary at `C:\ffmpeg\bin\ffmpeg.exe`.
-
-**`QSV does not appear to be available`**
-Install a QSV-enabled FFmpeg build (see [Requirements](#requirements)) and update Intel graphics drivers. Switch to **CPU – Software** mode in the meantime.
-
-**Encoding error with QSV**
-Some codec/format combinations lack a QSV encoder. Switch to **CPU – Software** mode; the FFmpeg error shown in the status log should identify the exact failure.
 
 **Encoding error with AMF**
 `av1_amf` only runs on RDNA3 (RX 7000) or newer GPUs. For older AMD cards, pick HEVC/H.264 source codecs or switch to **CPU – Software**. Update Adrenalin drivers if AMF reports `NotSupported`.
