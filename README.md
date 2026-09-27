@@ -1,10 +1,14 @@
 # BlackBar Remover
 
-A desktop application that detects and removes black bars (letterboxing and pillarboxing) from video files. The current GUI is a Wails app with a Go backend, a lightweight HTML/CSS/JS frontend, and FFmpeg/FFprobe for media analysis and encoding.
+A desktop app that detects and removes black bars (letterboxing and pillarboxing) from videos.
+It finds the picture area with FFmpeg's `cropdetect`, lets you check and fine-tune the crop in a
+zoomable before/after preview, and re-encodes only the video stream — on the GPU where possible.
 
-![Go](https://img.shields.io/badge/Go-1.22%2B-blue)
-![Wails](https://img.shields.io/badge/Wails-v2-blue)
-![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
+Built with Python and PyQt6. Runs on Windows, macOS (Apple Silicon) and Linux.
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![PyQt6](https://img.shields.io/badge/GUI-PyQt6-blue)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 ![FFmpeg](https://img.shields.io/badge/FFmpeg-required-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -12,102 +16,38 @@ A desktop application that detects and removes black bars (letterboxing and pill
 
 ## Features
 
-- **Automatic black bar detection** via FFmpeg's `cropdetect` filter, sampling frames at a configurable interval
-- **Before/after preview** with a time scrubber, zoom (up to 1600 %, Ctrl/⌘ + wheel or trackpad pinch), drag-to-pan with both panes kept in sync, and a side-by-side / stacked layout toggle
-- **Manual crop editor** — drag the crop box or its handles, type exact W/H/X/Y values, or pick a standard aspect ratio; changes apply immediately
-- **Batch processing** — drop a whole folder; detection runs up to 4 files in parallel
-- **Hardware-aware encoding modes**:
-  | Mode | Description |
-  |------|-------------|
-  | AMF (AMD) – HW Encode | Software decode + AMD AMF hardware encode (RDNA/RDNA2/RDNA3/RDNA4 GPUs incl. RX 9070 XT) |
-  | AMF (AMD) – Full HW Pipeline | D3D11VA decode + crop + AMF encode (Windows only) |
-  | VideoToolbox – HW Encode | Software decode + Apple VideoToolbox hardware encode on macOS |
-  | VideoToolbox – Full HW Pipeline | VideoToolbox decode + crop + encode on macOS |
-  | CPU – Software | libx264 / libx265 fully in software (universal fallback) |
-- **Quality & preset controls** — CQP (AMF), VideoToolbox quality, or CRF (CPU), plus speed preset
-- **Overwrite original** option (encodes to a temp file, then replaces with backup/restore protection)
-- **Per-file status** table with live encoding progress bar
+- **Automatic detection** with FFmpeg `cropdetect` — works for 8-bit and 10-bit/HDR sources; short clips are sampled more densely so detection always has enough frames
+- **Before/after preview** with a time scrubber, zoom from 10 % to 1600 % (buttons, Ctrl/⌘ + wheel, trackpad pinch, keyboard), drag-to-pan with both panes kept in sync, and a side-by-side / stacked layout
+- **Crop editor** — drag the crop box or its handles, type exact W/H/X/Y values, or pick a standard aspect ratio; edits apply immediately and snap to even numbers
+- **Batch processing** — load a folder (or drop it on the window); detection runs up to 4 files in parallel
+- **Hardware encoding** — AMD AMF (Radeon, incl. RX 9000 series) and Apple VideoToolbox, with CPU fallback
+- **Keeps everything else** — audio, subtitles, cover art, chapters and attachments are copied unchanged; only the main video stream is cropped and re-encoded
+- **Clear errors** — if an encode fails, FFmpeg's own error output is shown in the log
 
 ---
 
-## Requirements
+## Download
 
-### Wails app
+Ready-to-run builds are produced by GitHub Actions on every change to the app
+([Actions tab](https://github.com/pbzh/BlackBarRemover/actions)). Open the latest successful
+run of the relevant workflow and download its artifact (GitHub login required; artifacts are
+kept for 30 days).
 
-- Go 1.22 or newer
-- Wails v2 CLI
-- FFmpeg and FFprobe available on `PATH` or in a known install location
+| Platform | Workflow | Artifact |
+|---|---|---|
+| Windows x64 | **Build Windows app** | `BlackBarRemover-windows-x64` |
+| macOS, Apple Silicon | **Build macOS app** | `BlackBarRemover-macos-arm64` |
 
-Install Wails:
+FFmpeg is **not bundled** — install it separately (see [FFmpeg](#ffmpeg)).
 
-```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-```
+**Windows:** unzip and run `BlackBar Remover\BlackBar Remover.exe` (keep the other files next to
+it). The app is unsigned, so SmartScreen may warn: **More info → Run anyway**.
 
-### Legacy Python app
-
-The repository still includes `blackbar_remove.py`, the original PyQt6 implementation. Use it only if you specifically want the Python version.
-
-```bash
-pip install PyQt6
-python blackbar_remove.py
-```
-
-### FFmpeg
-FFmpeg must be installed and accessible. The application searches these locations automatically (in order):
-
-1. System `PATH` (recommended)
-2. `C:\ffmpeg\bin\`
-3. `C:\Program Files\ffmpeg\bin\`
-4. `~\ffmpeg\bin\`
-5. Scoop: `~\scoop\apps\ffmpeg\current\bin\`
-6. macOS Homebrew: `/opt/homebrew/bin/` or `/usr/local/bin/`
-7. Linux: `/usr/bin/`, `/usr/local/bin/`, `/snap/bin/`, or `~/bin/`
-
-#### Recommended FFmpeg build (includes AMF support)
-Download a full build from **[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)** — choose a `ffmpeg-master-latest-win64-gpl` release.
-
-#### Quick install options
-```powershell
-# winget
-winget install Gyan.FFmpeg
-
-# Scoop
-scoop install ffmpeg
-
-# Chocolatey
-choco install ffmpeg
-```
-
-### Hardware acceleration (optional)
-
-#### AMD AMF (Advanced Media Framework)
-AMF modes require:
-- An AMD GPU with VCN encode support (Polaris RX 400 series and newer; RDNA1/2/3/4 incl. RX 9070 XT all supported)
-- **Windows**: AMD Adrenalin drivers installed
-- **Linux**: Mesa with VA-API and the `amdgpu` kernel driver
-- An FFmpeg build with `--enable-amf` (BtbN GPL builds include this on Windows)
-
-AV1 encode (`av1_amf`) requires RDNA3 or newer (RX 7000 / RX 9000 series). HEVC and H.264 work on older RDNA generations as well.
-
-If AMF is unavailable the app warns on startup; CPU mode still works.
-
-#### Apple VideoToolbox
-VideoToolbox modes require macOS and an FFmpeg build with VideoToolbox support. Homebrew FFmpeg is usually sufficient:
+**macOS:** unzip, then remove the quarantine flag once, because the app is unsigned:
 
 ```bash
-brew install ffmpeg
+xattr -dr com.apple.quarantine "BlackBar Remover.app"
 ```
-
----
-
-## Supported Video Formats
-
-`.mp4` `.mkv` `.avi` `.mov` `.ts` `.flv` `.wmv` `.webm` `.m4v`
-
----
-
-## Installation
 
 ### Run from source
 
@@ -118,22 +58,135 @@ pip install PyQt6
 python blackbar_remove.py
 ```
 
-### macOS app (Apple Silicon)
+Requires Python 3.10 or newer.
 
-The **Build macOS app** GitHub Actions workflow (`.github/workflows/build-macos.yml`)
-builds `BlackBar Remover.app` with PyInstaller on an Apple Silicon runner. It runs on
-pushes that touch the app, the assets or the workflow, and can be started manually
-from the Actions tab. Download the `BlackBarRemover-macos-arm64` artifact from the run.
+---
 
-The app is unsigned, so remove the quarantine flag after unzipping:
+## FFmpeg
 
-```bash
-xattr -dr com.apple.quarantine "BlackBar Remover.app"
+`ffmpeg` and `ffprobe` must be installed. The app looks for them on `PATH` first, then in:
+
+- **Windows:** `C:\ffmpeg\bin\`, `C:\Program Files\ffmpeg\bin\`, `C:\Program Files (x86)\ffmpeg\bin\`, `~\ffmpeg\bin\`, Scoop (`~\scoop\apps\ffmpeg\current\bin\`), Chocolatey (`C:\ProgramData\chocolatey\bin\`)
+- **macOS:** `/opt/homebrew/bin/`, `/usr/local/bin/`, `~/bin/`
+- **Linux:** `/usr/bin/`, `/usr/local/bin/`, `/snap/bin/`, `~/bin/`
+
+At startup the log shows which FFmpeg was found and which hardware encoders are available.
+
+**Windows (AMD):** download `ffmpeg-master-latest-win64-gpl` from
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) and put `ffmpeg.exe` and `ffprobe.exe`
+in `C:\ffmpeg\bin`. Install current AMD Adrenalin drivers. Check AMF support with:
+
+```powershell
+ffmpeg -hide_banner -encoders | findstr amf
 ```
 
-FFmpeg is not bundled; install it with `brew install ffmpeg`.
+(`winget install Gyan.FFmpeg`, `scoop install ffmpeg` or `choco install ffmpeg` also work, as long
+as the check above lists the `*_amf` encoders.)
 
-To build locally on a Mac instead:
+**macOS:** `brew install ffmpeg` (includes VideoToolbox).
+
+**Linux:** use your distribution's FFmpeg. AMF on Linux additionally needs AMD's proprietary AMF
+runtime; without it, use CPU mode.
+
+---
+
+## Usage
+
+1. **Load** — choose **File** or **Folder (batch)** and click **Browse…**, paste a path and press
+   Enter, or drop a file/folder onto the window. Supported: `.mp4` `.mkv` `.avi` `.mov` `.ts`
+   `.flv` `.wmv` `.webm` `.m4v`.
+2. **Detect** — click **Detect Black Bars**. *Sample interval* sets the seconds between analysed
+   frames (lower = more thorough, slower). Results appear in the table; files without bars are
+   marked *No black bars* and skipped when processing.
+3. **Preview & adjust** — the first file with bars is previewed automatically; select or
+   double-click any row to preview it.
+   - Scrub the timeline to check other scenes.
+   - Adjust the crop by dragging the red box or its handles, with the **Aspect** dropdown, or the
+     **W / H / X / Y** fields. **Reset** returns to the detected crop.
+   - Zoom with **− / + / Fit / 1:1**, Ctrl/⌘ + mouse wheel, trackpad pinch, or Ctrl/⌘ `+` `−`
+     `0` (fit) `1` (100 %). Drag the image to pan. From 200 % pixels are shown unsmoothed, so bar
+     edges can be checked exactly.
+   - **⇅ / ⇆** switches between side-by-side and stacked panes (stacked suits very wide films).
+4. **Settings** — pick the HW mode, quality and preset (see below).
+5. **Process** — click **Process**. Output is written next to the source as
+   `<name>_cropped.<ext>` (same container), or replaces the source if *Overwrite original* is
+   checked. **Cancel** stops detection or processing and deletes the partially written output file.
+
+### Settings
+
+| Setting | Description |
+|---|---|
+| HW mode | Encoding path; only the modes available on your platform are listed (see below) |
+| Quality | 1 (best, largest) – 51 (smallest). Constant QP for AMF, `-q:v` 100–1 for VideoToolbox, CRF for CPU. Default 23 |
+| Preset | `veryfast` … `veryslow`. AMF maps it to speed / balanced / quality; not used by VideoToolbox |
+| Sample interval | Seconds between frames analysed during detection (default 15 s) |
+| Output suffix | Appended to the output file name (default `_cropped`) |
+| Overwrite original | Encode to `<name>_tmp.<ext>`, then replace the source with it. There is no backup — keep a copy if you need one |
+
+---
+
+## Hardware modes
+
+| Mode | Platform | Decode | Crop | Encode |
+|---|---|---|---|---|
+| AMF – HW Encode (AMD) | Windows, Linux | CPU | CPU | GPU (AMF) |
+| AMF – Full HW Pipeline (AMD) | Windows | GPU (D3D11VA) | CPU | GPU (AMF) |
+| VideoToolbox – HW Encode | macOS | CPU | CPU | GPU (VideoToolbox) |
+| VideoToolbox – Full HW Pipeline | macOS | GPU (VideoToolbox) | CPU | GPU (VideoToolbox) |
+| CPU – Software | all | CPU | CPU | CPU (libx264 / libx265 / libvpx-vp9) |
+
+**HW Encode vs. Full HW Pipeline:** the only difference is where the source is decoded. Output
+quality is identical.
+
+- **Full HW Pipeline** decodes on the GPU. Best for heavy sources (4K, HEVC, 10-bit/HDR, AV1) and
+  leaves the CPU almost idle.
+- **HW Encode** decodes on the CPU. Works with every source codec and is often just as fast for
+  1080p H.264.
+- On Windows, Full HW decodes H.264, HEVC, VP9 and AV1 on the GPU; other codecs (e.g. MPEG-2,
+  VC-1 — no longer hardware-decodable on RDNA4) automatically fall back to CPU decode. On macOS,
+  use **HW Encode** if Full HW fails for an unusual source codec.
+- VideoToolbox constant-quality encoding requires Apple Silicon.
+
+### Output codec
+
+The output keeps the source codec where the selected encoder supports it:
+
+| Source | AMF | VideoToolbox | CPU |
+|---|---|---|---|
+| H.264 | `h264_amf` | `h264_videotoolbox` | `libx264` |
+| HEVC | `hevc_amf` | `hevc_videotoolbox` | `libx265` |
+| AV1 | `av1_amf` (RDNA3 or newer) | `h264_videotoolbox` | `libx264` |
+| VP9 | `h264_amf` | `h264_videotoolbox` | `libvpx-vp9` |
+| Other | `h264_amf` | `h264_videotoolbox` | `libx264` |
+
+Hardware H.264 encoders are 8-bit only — use **CPU** mode for 10-bit H.264 sources.
+
+---
+
+## Troubleshooting
+
+**`ffmpeg not found`** — install FFmpeg (see [FFmpeg](#ffmpeg)) and restart the app.
+
+**No AMF / VideoToolbox encoder found** — your FFmpeg build lacks hardware encoder support. Use a
+BtbN build on Windows or Homebrew FFmpeg on macOS, and update GPU drivers. CPU mode always works.
+
+**An encode fails** — the log shows FFmpeg's error output below the failed file. Common causes:
+`av1_amf` on a pre-RDNA3 GPU, a 10-bit H.264 source in a hardware mode, or an unusual source codec
+in *Full HW Pipeline* mode. Try **HW Encode**, then **CPU – Software**.
+
+**Detection failed** — the file may be damaged, or FFmpeg could not decode it. Check the file in
+a player and try again with a smaller sample interval.
+
+**Preview shows "Failed to extract frame"** — scrub to a different position; the file may be
+damaged at that point.
+
+---
+
+## Building the apps yourself
+
+The workflows in `.github/workflows/` package the app with PyInstaller. To build locally:
+
+**macOS**
 
 ```bash
 pip install PyQt6 pyinstaller pillow
@@ -141,20 +194,7 @@ pyinstaller --noconfirm --windowed --name "BlackBar Remover" \
   --icon assets/appicon.png --add-data "assets:assets" blackbar_remove.py
 ```
 
-### Windows app (x64, e.g. AMD RX 9000 series)
-
-The **Build Windows app** workflow (`.github/workflows/build-windows.yml`) builds
-`BlackBar Remover.exe` on a Windows runner. It runs on the same kind of pushes as the macOS
-build and can be started manually. Download the `BlackBarRemover-windows-x64` artifact,
-unzip it, and run `BlackBar Remover.exe` from inside the unzipped folder (keep the files
-next to it). Windows SmartScreen may warn because the app is unsigned: **More info → Run anyway**.
-
-FFmpeg is not bundled. For AMD AMF encoding, download `ffmpeg-master-latest-win64-gpl`
-from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) and put `ffmpeg.exe` and
-`ffprobe.exe` in `C:\ffmpeg\bin` (or anywhere on `PATH`), with current AMD Adrenalin drivers
-installed. Check with `ffmpeg -hide_banner -encoders | findstr amf`.
-
-To build locally on Windows instead (PowerShell):
+**Windows (PowerShell)**
 
 ```powershell
 py -m pip install PyQt6 pyinstaller pillow
@@ -162,116 +202,34 @@ py -m PyInstaller --noconfirm --windowed --name "BlackBar Remover" `
   --icon assets/appicon.png --add-data "assets;assets" blackbar_remove.py
 ```
 
----
-
-## Usage
-
-### 1. Load files
-- Select **Single File** or **Folder (Batch)**, then click **Browse…**
-- All supported video files are listed in the table with their resolution and codec
-
-### 2. Detect black bars
-- Adjust **Sample Interval** (seconds between sampled frames; lower = more accurate, slower)
-- Click **Detect Black Bars**
-- Up to 4 files are analysed in parallel; results appear in the table as they finish
-- Files with no black bars are marked *No black bars* and skipped during processing
-
-### 3. Preview & adjust (optional)
-- Select or double-click a row (after detection the first file with bars is previewed automatically)
-- Scrub the timeline to check different timestamps
-- Adjust the crop by dragging the red box or its handles, with the **Aspect** dropdown, or the **W / H / X / Y** fields — edits apply immediately (values snap to even numbers); **Reset** reverts to the detected crop
-- Zoom with **− / + / Fit / 1:1**, Ctrl/⌘ + mouse wheel, trackpad pinch, or Ctrl/⌘ `+` `−` `0` (fit) `1` (100 %); drag the image to pan. From 200 % pixels are shown unsmoothed so bar edges can be checked exactly
-- **⇅ / ⇆** switches between side-by-side and stacked panes
-
-### 4. Configure encoding
-| Setting | Description |
-|---------|-------------|
-| HW Mode | AMF / VideoToolbox / CPU modes, filtered by platform |
-| Quality | 1 (best) – 51 (smallest); maps to constant QP (AMF), VideoToolbox quality, or `CRF` (CPU) |
-| Preset | Encoding speed: `veryfast` → `veryslow` |
-| Output suffix | String appended to output filename (default `_cropped`) |
-| Overwrite original | Encode to a temporary file, then replace the source with backup/restore protection |
-
-### 5. Process
-- Click **Process** — only files with detected black bars are encoded
-- A progress bar shows per-file encode progress (%)
-- Output files land next to the originals (or replace them if *Overwrite original* is checked)
+The result is in `dist/`. Both workflows can also be started manually from the Actions tab
+(**Run workflow**).
 
 ---
 
-## Codec Support Matrix
+## How it works
 
-| Source Codec | AMF Encoder | VideoToolbox Encoder | CPU Encoder |
-|---|---|---|---|
-| H.264 (8-bit) | `h264_amf` | `h264_videotoolbox` | `libx264` |
-| H.264 (10-bit) | `h264_amf` (8-bit only — use CPU) | `h264_videotoolbox` (8-bit only — use CPU) | `libx264` |
-| HEVC / H.265 | `hevc_amf` | `hevc_videotoolbox` | `libx265` |
-| AV1 | `av1_amf` (RDNA3+) | `h264_videotoolbox` | `libx264` |
-| VP9 | `h264_amf` | `h264_videotoolbox` | `libvpx-vp9` |
-| Other | `h264_amf` | `h264_videotoolbox` | `libx264` |
-
-Audio and subtitle streams are always copied without re-encoding.
-
----
-
-## Architecture
-
-### Wails app
-
-```
-wails-app/
-├── main.go                  # Wails application setup and window options
-├── app.go                   # Wails-bound app methods, dialogs, state, events
-├── ffmpeg.go                # FFmpeg/FFprobe discovery, cropdetect, encode args, crop math
-├── frontend/
-│   ├── index.html           # Application shell
-│   └── src/
-│       ├── app.js           # UI state, Wails calls, event handlers, preview rendering
-│       └── style.css        # Desktop UI styling
-└── wails.json               # Wails build configuration
-```
-
-Detection and encoding run in Go goroutines and publish progress through Wails runtime events. Detection updates shared crop state under a mutex; processing uses immutable file snapshots for safer concurrent behavior. Preview scrubbing guards against stale asynchronous frame results so older FFmpeg frame extractions cannot overwrite newer scrub positions.
-
-Encoding captures the tail of FFmpeg stderr and logs it on failure, which makes codec, filter, permission, and hardware acceleration problems easier to diagnose.
-
-### Legacy Python app
+Everything lives in a single file, `blackbar_remove.py`:
 
 ```
 blackbar_remove.py
-├── Constants & codec maps
-├── find_ffmpeg_tool()       — PATH + known install locations (no subprocess)
-├── check_hw_available()     — probes FFmpeg hwaccels + encoders lists
-├── get_video_info()         — ffprobe JSON → stream metadata
-├── extract_frame()          — single-frame PNG extraction via ffmpeg
-├── calc_crop_for_aspect()   — geometry helper for standard aspect ratios
-├── CropDetectWorker         — async QProcess wrapper for cropdetect
-├── EncodeWorker             — async QProcess wrapper for encoding
-├── ZoomImageView / CropCanvas / ZoomScrollArea — zoomable frame views, crop overlay, pan & zoom input
-├── PreviewPanel             — before/after panes with scrubber, zoom & crop editor
-└── BlackBarRemoveApp        — QMainWindow, table, batch orchestration
+├── find_ffmpeg_tool() / check_hw_available()   FFmpeg discovery and HW encoder probing
+├── get_video_info()                            ffprobe → codec, size, duration, main video stream
+├── CropDetectWorker                            cropdetect via QProcess; most frequent crop wins
+├── EncodeWorker                                builds the FFmpeg command per HW mode; progress + error capture
+├── ZoomImageView / CropCanvas / ZoomScrollArea zoomable frame views, crop overlay, pan & zoom input
+├── PreviewPanel                                scrubber, before/after panes, crop editing
+└── BlackBarRemoveApp                           main window, file table, batch detection & encoding
 ```
 
-The Python app uses `QProcess` for detection and encoding, a `ThreadPoolExecutor` for parallel ffprobe on load, and a background thread for preview frame extraction.
-
----
-
-## Troubleshooting
-
-**`ffmpeg not found`**
-Add ffmpeg to your system PATH or place the binary at `C:\ffmpeg\bin\ffmpeg.exe`.
-
-**Encoding error with AMF**
-`av1_amf` only runs on RDNA3 (RX 7000) or newer GPUs. For older AMD cards, pick HEVC/H.264 source codecs or switch to **CPU – Software**. Update Adrenalin drivers if AMF reports `NotSupported`.
-
-**Encoding error with VideoToolbox**
-Some codecs or pixel formats are not supported by VideoToolbox. Switch to **CPU – Software** mode or use a source format supported by the VideoToolbox encoder.
-
-**Preview shows "Failed to extract frame"**
-The timestamp may be beyond the video's duration, or the file is corrupted. Try scrubbing to a different position.
-
-**Overwrite original fails**
-The Wails app writes a temporary encoded file first, then replaces the source. If replacement fails because of file permissions, locks, or cross-device filesystem behavior, the original file is restored from a temporary backup when possible.
+- **Detection** runs `cropdetect` on frames sampled every *N* seconds and picks the most
+  frequently reported crop.
+- **Preview** extracts one frame per scrub position; the "after" pane shows the crop region of
+  that same frame, so it updates live while you edit.
+- **Encoding** maps all streams, stream-copies everything, and re-encodes only the main video
+  stream with the crop filter — so cover art, subtitles and audio pass through untouched.
+- FFmpeg runs through `QProcess` (detection, encoding) and background threads (ffprobe, frame
+  extraction), so the UI never blocks.
 
 ---
 
